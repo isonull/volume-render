@@ -11,5 +11,9 @@
   "devDependencies": {
     "typescript": "~6.0.2",
     "vite": "^8.0.12"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "nifti-reader-js": "^0.8.0"
   }
 }
