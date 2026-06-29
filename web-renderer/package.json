@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "fflate": "^0.8.3",
-    "nifti-reader-js": "^0.8.0"
+    "nifti-reader-js": "^0.8.0",
+    "wgpu-matrix": "^3.4.2"
   }
 }

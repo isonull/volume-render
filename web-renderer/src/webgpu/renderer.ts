@@ -1,5 +1,6 @@
 import renderSampleShader from './shaders/renderSample.wgsl?raw'
 import presentShader from './shaders/present.wgsl?raw'
+import { PerspectiveCamera, packCameraUniform } from './camera'
 import { packDensityR8 } from '../volume/density'
 import type { DensityVolume, MajorantGrid, Vec3 } from '../volume/volumeData'
 
@@ -48,6 +49,7 @@ export class VolumeRenderer {
   private readonly paramsBuffer: GPUBuffer
   private readonly emptyMajorantBuffer: GPUBuffer
   private readonly emptyDensityTexture: GPUTexture
+  private readonly densitySampler: GPUSampler
   private accumBuffer: GPUBuffer
   private bindGroup: GPUBindGroup | null = null
   private presentBindGroup: GPUBindGroup | null = null
@@ -95,6 +97,14 @@ export class VolumeRenderer {
       dimension: '3d',
       format: 'r8unorm',
       usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_DST,
+    })
+    this.densitySampler = device.createSampler({
+      minFilter: 'linear',
+      magFilter: 'linear',
+      mipmapFilter: 'nearest',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+      addressModeW: 'clamp-to-edge',
     })
     this.accumBuffer = this.createAccumBuffer()
     this.device.queue.writeBuffer(this.emptyMajorantBuffer, 0, new Float32Array([1]))
@@ -263,7 +273,8 @@ export class VolumeRenderer {
         { binding: 1, resource: { buffer: this.paramsBuffer } },
         { binding: 2, resource: { buffer: this.accumBuffer } },
         { binding: 3, resource: (volume?.densityTexture ?? this.emptyDensityTexture).createView() },
-        { binding: 4, resource: { buffer: volume?.majorantBuffer ?? this.emptyMajorantBuffer } },
+        { binding: 4, resource: this.densitySampler },
+        { binding: 5, resource: { buffer: volume?.majorantBuffer ?? this.emptyMajorantBuffer } },
       ],
     })
   }
@@ -305,15 +316,15 @@ export class VolumeRenderer {
   }
 
   private writeCameraUniform(): void {
-    const aspect = this.width / Math.max(1, this.height)
-    const eye = this.cameraPosition()
-    const view = lookAt(eye, [0, 0, 0], [0, 1, 0])
-    const projection = perspective((45 * Math.PI) / 180, aspect, 0.01, 20)
-    const invViewProj = invert4(multiply4(projection, view))
-    const data = new Float32Array(CAMERA_UNIFORM_BYTES / 4)
-    data.set(invViewProj, 0)
-    data.set([eye[0], eye[1], eye[2], this.frameIndex], 16)
-    data.set([this.width, this.height, performance.now() * 0.001, 0], 20)
+    const camera = new PerspectiveCamera({
+      resolution: [this.width, this.height],
+      position: this.cameraPosition(),
+      target: [0, 0, 0],
+      fovYDegrees: 45,
+      near: 0.01,
+      far: 20,
+    })
+    const data = packCameraUniform(camera.uniform(this.frameIndex, performance.now() * 0.001))
     this.device.queue.writeBuffer(this.cameraBuffer, 0, data)
   }
 
@@ -427,120 +438,3 @@ async function shaderDiagnostics(module: GPUShaderModule, label: string): Promis
     .map((message) => `${label}:${message.lineNum}:${message.linePos} ${message.message}`)
 }
 
-function perspective(fovy: number, aspect: number, near: number, far: number): Float32Array {
-  const f = 1 / Math.tan(fovy / 2)
-  const nf = 1 / (near - far)
-  return new Float32Array([
-    f / aspect,
-    0,
-    0,
-    0,
-    0,
-    f,
-    0,
-    0,
-    0,
-    0,
-    (far + near) * nf,
-    -1,
-    0,
-    0,
-    2 * far * near * nf,
-    0,
-  ])
-}
-
-function lookAt(eye: Vec3, center: Vec3, up: Vec3): Float32Array {
-  const z = normalize(subtract(eye, center))
-  const x = normalize(cross(up, z))
-  const y = cross(z, x)
-  return new Float32Array([
-    x[0],
-    y[0],
-    z[0],
-    0,
-    x[1],
-    y[1],
-    z[1],
-    0,
-    x[2],
-    y[2],
-    z[2],
-    0,
-    -dot(x, eye),
-    -dot(y, eye),
-    -dot(z, eye),
-    1,
-  ])
-}
-
-function multiply4(a: Float32Array, b: Float32Array): Float32Array {
-  const out = new Float32Array(16)
-  for (let col = 0; col < 4; col += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      out[col * 4 + row] =
-        a[0 * 4 + row] * b[col * 4 + 0] +
-        a[1 * 4 + row] * b[col * 4 + 1] +
-        a[2 * 4 + row] * b[col * 4 + 2] +
-        a[3 * 4 + row] * b[col * 4 + 3]
-    }
-  }
-  return out
-}
-
-function invert4(m: Float32Array): Float32Array {
-  const out = new Float32Array(16)
-  const b00 = m[0] * m[5] - m[1] * m[4]
-  const b01 = m[0] * m[6] - m[2] * m[4]
-  const b02 = m[0] * m[7] - m[3] * m[4]
-  const b03 = m[1] * m[6] - m[2] * m[5]
-  const b04 = m[1] * m[7] - m[3] * m[5]
-  const b05 = m[2] * m[7] - m[3] * m[6]
-  const b06 = m[8] * m[13] - m[9] * m[12]
-  const b07 = m[8] * m[14] - m[10] * m[12]
-  const b08 = m[8] * m[15] - m[11] * m[12]
-  const b09 = m[9] * m[14] - m[10] * m[13]
-  const b10 = m[9] * m[15] - m[11] * m[13]
-  const b11 = m[10] * m[15] - m[11] * m[14]
-  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06
-
-  if (!det) {
-    return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
-  }
-
-  det = 1 / det
-  out[0] = (m[5] * b11 - m[6] * b10 + m[7] * b09) * det
-  out[1] = (m[2] * b10 - m[1] * b11 - m[3] * b09) * det
-  out[2] = (m[13] * b05 - m[14] * b04 + m[15] * b03) * det
-  out[3] = (m[10] * b04 - m[9] * b05 - m[11] * b03) * det
-  out[4] = (m[6] * b08 - m[4] * b11 - m[7] * b07) * det
-  out[5] = (m[0] * b11 - m[2] * b08 + m[3] * b07) * det
-  out[6] = (m[14] * b02 - m[12] * b05 - m[15] * b01) * det
-  out[7] = (m[8] * b05 - m[10] * b02 + m[11] * b01) * det
-  out[8] = (m[4] * b10 - m[5] * b08 + m[7] * b06) * det
-  out[9] = (m[1] * b08 - m[0] * b10 - m[3] * b06) * det
-  out[10] = (m[12] * b04 - m[13] * b02 + m[15] * b00) * det
-  out[11] = (m[9] * b02 - m[8] * b04 - m[11] * b00) * det
-  out[12] = (m[5] * b07 - m[4] * b09 - m[6] * b06) * det
-  out[13] = (m[8] * b03 - m[0] * b07 + m[2] * b06) * det
-  out[14] = (m[13] * b01 - m[12] * b03 - m[14] * b00) * det
-  out[15] = (m[4] * b03 - m[8] * b01 + m[9] * b00) * det
-  return out
-}
-
-function subtract(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-function cross(a: Vec3, b: Vec3): Vec3 {
-  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-function dot(a: Vec3, b: Vec3): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-function normalize(v: Vec3): Vec3 {
-  const invLength = 1 / Math.max(1e-8, Math.hypot(v[0], v[1], v[2]))
-  return [v[0] * invLength, v[1] * invLength, v[2] * invLength]
-}
