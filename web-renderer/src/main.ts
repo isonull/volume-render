@@ -1,6 +1,8 @@
 import './style.css'
-import type { NiftiVolume, Vec3 } from './volume/volumeData'
-import type { VolumeRenderer, RendererParams } from './webgpu/renderer'
+import { mat4 } from 'wgpu-matrix'
+import { ScalarVolume } from './volume'
+import type { Vec3 } from './volume'
+import type { VolumeRenderer, RendererParams } from './pbr/renderer'
 
 const app = document.querySelector<HTMLDivElement>('#app')
 if (!app) {
@@ -64,10 +66,10 @@ const fileInput = byId<HTMLInputElement>('file')
 const resetButton = byId<HTMLButtonElement>('reset')
 
 let renderer: VolumeRenderer | null = null
-let sourceVolume: NiftiVolume | null = null
+let sourceVolume: ScalarVolume | null = null
 let volumeModules: {
-  createDensityVolume: typeof import('./volume/density').createDensityVolume
-  buildMajorantGrid: typeof import('./volume/majorantGrid').buildMajorantGrid
+  createDensityVolume: typeof import('./pbr/density').createDensityVolume
+  buildMajorantGrid: typeof import('./pbr/majorantGrid').buildMajorantGrid
 } | null = null
 
 const controls = [
@@ -88,7 +90,7 @@ void boot()
 
 async function boot(): Promise<void> {
   try {
-    const { VolumeRenderer } = await import('./webgpu/renderer')
+    const { VolumeRenderer } = await import('./pbr/renderer')
     renderer = await VolumeRenderer.create(canvas)
     renderer.onError((message) => {
       statusEl.textContent = `WebGPU error: ${message}`
@@ -111,9 +113,9 @@ function bindUi(): void {
 
     try {
       statusEl.textContent = `Loading ${file.name}...`
-      const { loadNiftiFile } = await import('./io/niftiLoader')
-      sourceVolume = await loadNiftiFile(file)
-      setWindowInputs(sourceVolume.intensityMin, sourceVolume.intensityMax)
+      const { loadNiftiFile, scalarVolumeFromNiftiFile } = await import('./io/nifti')
+      sourceVolume = scalarVolumeFromNiftiFile(await loadNiftiFile(file))
+      setWindowInputs(...valueRange(sourceVolume))
       await rebuildDensity()
       statusEl.textContent = `${file.name} loaded.`
     } catch (error) {
@@ -157,7 +159,8 @@ async function loadTestSphere(): Promise<void> {
       }
     }
   }
-  sourceVolume = { dims, spacing: [1, 1, 1], data, intensityMin: 0, intensityMax: 1 }
+  const indexToWorld = mat4.identity()
+  sourceVolume = new ScalarVolume(dims, data, indexToWorld)
   await rebuildDensity()
 }
 
@@ -180,8 +183,8 @@ async function rebuildDensity(): Promise<void> {
 async function getVolumeModules(): Promise<NonNullable<typeof volumeModules>> {
   if (!volumeModules) {
     const [density, majorant] = await Promise.all([
-      import('./volume/density'),
-      import('./volume/majorantGrid'),
+      import('./pbr/density'),
+      import('./pbr/majorantGrid'),
     ])
     volumeModules = {
       createDensityVolume: density.createDensityVolume,
@@ -202,13 +205,24 @@ function readParams(): RendererParams {
   }
 }
 
-function renderVolumeInfo(volume: NiftiVolume, densityDims: Vec3, majorantMax: number): void {
+function renderVolumeInfo(volume: ScalarVolume, densityDims: Vec3, majorantMax: number): void {
+  const [min, max] = valueRange(volume)
   volumeInfoEl.innerHTML = `
-    <div><dt>Volume</dt><dd>${volume.dims.join(' x ')}</dd></div>
-    <div><dt>Spacing</dt><dd>${volume.spacing.map(formatNumber).join(', ')}</dd></div>
-    <div><dt>Intensity</dt><dd>${formatNumber(volume.intensityMin)} to ${formatNumber(volume.intensityMax)}</dd></div>
+    <div><dt>Volume</dt><dd>${volume.shape.join(' x ')}</dd></div>
+    <div><dt>Intensity</dt><dd>${formatNumber(min)} to ${formatNumber(max)}</dd></div>
     <div><dt>Density</dt><dd>${densityDims.join(' x ')} / max ${formatNumber(majorantMax)}</dd></div>
   `
+}
+
+function valueRange(volume: ScalarVolume): [number, number] {
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < volume.data.length; i += 1) {
+    const value = volume.data[i]
+    min = Math.min(min, value)
+    max = Math.max(max, value)
+  }
+  return [min, max]
 }
 
 function setWindowInputs(min: number, max: number): void {

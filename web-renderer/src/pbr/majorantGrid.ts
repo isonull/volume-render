@@ -1,5 +1,6 @@
-import type { DensityVolume, MajorantGrid, Vec3 } from './volumeData'
-import { DEFAULT_VOLUME_BOUNDS } from './volumeData'
+import type { Vec3 } from '../volume'
+import type { DensityVolume, MajorantGrid } from './types'
+import { DEFAULT_VOLUME_BOUNDS } from './types'
 
 export function buildMajorantGrid(volume: DensityVolume, res: Vec3 = [16, 16, 16]): MajorantGrid {
   const voxels = new Float32Array(res[0] * res[1] * res[2])

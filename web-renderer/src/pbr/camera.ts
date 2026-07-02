@@ -1,5 +1,5 @@
 import { mat4, vec3, type Mat4 } from 'wgpu-matrix'
-import type { Vec3 } from '../volume/volumeData'
+import type { Vec3 } from '../volume'
 
 export type Vec2 = [number, number]
 

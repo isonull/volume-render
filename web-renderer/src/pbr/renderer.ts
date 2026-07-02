@@ -1,8 +1,9 @@
 import renderSampleShader from './shaders/renderSample.wgsl?raw'
 import presentShader from './shaders/present.wgsl?raw'
 import { PerspectiveCamera, packCameraUniform } from './camera'
-import { packDensityR8 } from '../volume/density'
-import type { DensityVolume, MajorantGrid, Vec3 } from '../volume/volumeData'
+import { packDensityR8 } from './density'
+import type { Vec3 } from '../volume'
+import type { DensityVolume, MajorantGrid } from './types'
 
 export interface RendererParams {
   sigmaA: Vec3
@@ -25,18 +26,6 @@ interface GpuVolume {
 
 const CAMERA_UNIFORM_BYTES = 96
 const PARAM_UNIFORM_BYTES = 96
-const BUFFER_USAGE = {
-  COPY_DST: 8,
-  UNIFORM: 64,
-  STORAGE: 128,
-} as const
-const TEXTURE_USAGE = {
-  COPY_DST: 2,
-  TEXTURE_BINDING: 4,
-  STORAGE_BINDING: 8,
-  RENDER_ATTACHMENT: 16,
-} as const
-
 export class VolumeRenderer {
   private readonly canvas: HTMLCanvasElement
   private readonly device: GPUDevice
@@ -82,21 +71,21 @@ export class VolumeRenderer {
     this.pendingErrors = pendingErrors
     this.cameraBuffer = device.createBuffer({
       size: CAMERA_UNIFORM_BYTES,
-      usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     this.paramsBuffer = device.createBuffer({
       size: PARAM_UNIFORM_BYTES,
-      usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     this.emptyMajorantBuffer = device.createBuffer({
       size: 4,
-      usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     this.emptyDensityTexture = device.createTexture({
       size: [1, 1, 1],
       dimension: '3d',
       format: 'r8unorm',
-      usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_DST,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
     this.densitySampler = device.createSampler({
       minFilter: 'linear',
@@ -158,13 +147,13 @@ export class VolumeRenderer {
       size: volume.dims,
       dimension: '3d',
       format: 'r8unorm',
-      usage: TEXTURE_USAGE.TEXTURE_BINDING | TEXTURE_USAGE.COPY_DST,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     })
     this.writeDensityTexture(densityTexture, volume)
 
     const majorantBuffer = this.device.createBuffer({
       size: Math.max(4, majorant.voxels.byteLength),
-      usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     this.device.queue.writeBuffer(majorantBuffer, 0, majorant.voxels)
 
@@ -253,14 +242,14 @@ export class VolumeRenderer {
       device: this.device,
       format: this.format,
       alphaMode: 'opaque',
-      usage: TEXTURE_USAGE.RENDER_ATTACHMENT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
     })
   }
 
   private createAccumBuffer(): GPUBuffer {
     return this.device.createBuffer({
       size: Math.max(16, this.width * this.height * 16),
-      usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
   }
 

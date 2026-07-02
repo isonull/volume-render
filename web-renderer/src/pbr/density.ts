@@ -1,4 +1,5 @@
-import type { DensityVolume, NiftiVolume, Vec3 } from './volumeData'
+import type { ScalarVolume, Vec3 } from '../volume'
+import type { DensityVolume } from './types'
 
 export interface DensityOptions {
   windowMin: number
@@ -7,22 +8,17 @@ export interface DensityOptions {
 }
 
 export function createDensityVolume(
-  volume: NiftiVolume,
+  volume: ScalarVolume,
   options: DensityOptions,
 ): DensityVolume {
   const maxDim = options.maxDim ?? 128
-  const sourceDims = volume.dims
+  const { data, shape: sourceDims } = volume
   const sourceMax = Math.max(...sourceDims)
   const factor = sourceMax > maxDim ? maxDim / sourceMax : 1
   const dims: Vec3 = [
     Math.max(1, Math.round(sourceDims[0] * factor)),
     Math.max(1, Math.round(sourceDims[1] * factor)),
     Math.max(1, Math.round(sourceDims[2] * factor)),
-  ]
-  const spacing: Vec3 = [
-    volume.spacing[0] * (sourceDims[0] / dims[0]),
-    volume.spacing[1] * (sourceDims[1] / dims[1]),
-    volume.spacing[2] * (sourceDims[2] / dims[2]),
   ]
   const density = new Float32Array(dims[0] * dims[1] * dims[2])
   const range = Math.max(1e-6, options.windowMax - options.windowMin)
@@ -35,12 +31,12 @@ export function createDensityVolume(
         const sourceX = Math.min(sourceDims[0] - 1, Math.floor((x / dims[0]) * sourceDims[0]))
         const sourceIndex = sourceX + sourceDims[0] * (sourceY + sourceDims[1] * sourceZ)
         const targetIndex = x + dims[0] * (y + dims[1] * z)
-        density[targetIndex] = clamp01((volume.data[sourceIndex] - options.windowMin) / range)
+        density[targetIndex] = clamp01((data[sourceIndex] - options.windowMin) / range)
       }
     }
   }
 
-  return { dims, spacing, density }
+  return { dims, density }
 }
 
 export function packDensityR8(volume: DensityVolume): Uint8Array {

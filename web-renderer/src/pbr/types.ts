@@ -1,21 +1,12 @@
-export type Vec3 = [number, number, number]
+import type { Vec3 } from '../volume'
 
 export interface Bounds3 {
   pMin: Vec3
   pMax: Vec3
 }
 
-export interface NiftiVolume {
-  dims: Vec3
-  spacing: Vec3
-  data: Float32Array
-  intensityMin: number
-  intensityMax: number
-}
-
 export interface DensityVolume {
   dims: Vec3
-  spacing: Vec3
   density: Float32Array
 }
 
