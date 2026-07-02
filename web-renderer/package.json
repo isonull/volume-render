@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@webgpu/types": "^0.1.71",
     "typescript": "~6.0.2",
     "vite": "^8.0.12"
@@ -16,6 +18,8 @@
   "dependencies": {
     "fflate": "^0.8.3",
     "nifti-reader-js": "^0.8.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "wgpu-matrix": "^3.4.2"
   }
 }

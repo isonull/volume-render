@@ -1,4 +1,7 @@
-# NIfTI WebGPU Volume Path Tracing MVP
+# Deprecated: NIfTI WebGPU Volume Path Tracing MVP
+
+This document is not the active MVP design. The active MVP is the
+three-direction MPR viewer specified in `docs/architecture/`.
 
 本文定义 `web-renderer` 第一版 MVP：在浏览器中加载 `.nii` / `.nii.gz` 体素数据，并用 WebGPU 实现一个最小版、定义上对齐 pbrt-v4 的 volume path tracing renderer。
 
@@ -333,7 +336,7 @@ fn Li(ray: Ray, rng: ptr<function, Rng>) -> vec3f
 
 ```text
 src/
-  main.ts
+  pbr.ts
   style.css
   io/
     niftiLoader.ts

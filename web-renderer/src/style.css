@@ -37,7 +37,14 @@ button:hover {
   background: #293241;
 }
 
-.shell {
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.shell,
+.mpr-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   width: 100vw;
@@ -45,11 +52,28 @@ button:hover {
   overflow: hidden;
 }
 
-.viewport {
+.viewport,
+.mpr-viewport,
+.mpr-empty {
   position: relative;
   min-width: 0;
   min-height: 0;
   background: #050608;
+}
+
+.mpr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  min-width: 0;
+  min-height: 0;
+  background: #242b36;
+}
+
+.mpr-empty {
+  border: 1px solid rgba(166, 177, 194, 0.08);
+  background: #07090c;
 }
 
 canvas {
@@ -75,6 +99,18 @@ canvas {
   background: rgba(11, 13, 16, 0.72);
   padding: 7px 10px;
   color: #c9d2df;
+}
+
+.viewport-label {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  border: 1px solid rgba(166, 177, 194, 0.24);
+  border-radius: 6px;
+  background: rgba(11, 13, 16, 0.72);
+  padding: 5px 8px;
+  color: #dce4ef;
+  font-weight: 650;
 }
 
 .controls {
@@ -144,6 +180,13 @@ input[type="file"] {
   gap: 6px;
 }
 
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 fieldset {
   border: 1px solid #26303d;
   border-radius: 8px;
@@ -182,7 +225,8 @@ fieldset {
 }
 
 @media (max-width: 860px) {
-  .shell {
+  .shell,
+  .mpr-shell {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(360px, 58vh) minmax(0, 1fr);
   }

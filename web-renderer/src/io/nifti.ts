@@ -53,7 +53,7 @@ export async function loadNiftiFile(file: File): Promise<NiftiFile> {
   }
 }
 
-export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile): ScalarVolume {
+export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile, fileName?: string): ScalarVolume {
   const { header, image } = niftiFile
   const layout = parseNiftiLayout(header)
   const kind = classifyNifti(header, layout)
@@ -68,7 +68,7 @@ export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile): ScalarVolume {
     )
   }
 
-  if (kind !== 'scalar-volume' && kind !== 'labelmap') {
+  if (kind !== 'scalar-volume') {
     throw new Error(`Cannot convert ${kind} NIfTI to ScalarVolume.`)
   }
 
@@ -83,7 +83,13 @@ export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile): ScalarVolume {
   const intercept = header.scl_inter || 0
   const data = convertImageToScalarArray(header, image, voxelCount, slope, intercept)
 
-  return new ScalarVolume(dims, data, indexToWorld)
+  return new ScalarVolume(dims, data, indexToWorld, {
+    id: 'volume',
+    source: {
+      kind: 'nifti',
+      uri: fileName,
+    },
+  })
 }
 
 function parseNiftiLayout(header: NiftiHeader): NiftiLayout {

@@ -35,5 +35,4 @@ client-to-canvas coordinate conversion
 ```
 
 Viewport should not own medical data, `Scene`, `PreparedScene`, or
-renderer-specific `RenderState`; the same viewport can be reused with different
-renderers and different render states.
+`MprRenderState`; the same viewport can be reused with a different render state.

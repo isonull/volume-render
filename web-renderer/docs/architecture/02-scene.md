@@ -1,16 +1,15 @@
 # Section 2. Scene
 
-`Scene` is the long-lived source of truth for the first implementation. For
-now it only models scalar volumes and labelmap segmentations.
+`Scene` is the long-lived CPU-side source of truth for the first
+implementation. For now it only models scalar volumes loaded from NIfTI files.
 
 Scene owns:
 
 ```text
 scalar volumes
-labelmap segmentations
 scene version
 change journal
-index-to-world transforms
+NIfTI-derived index-to-world transforms
 ```
 
 Scene does not own:
@@ -23,20 +22,19 @@ prepared draw lists
 pipeline assignments
 renderer-specific caches
 viewport canvas/context
-non-volume and non-labelmap data
+labelmap segmentations
+non-volume data
 ```
 
-Those belong to `PreparedScene`, `PreparedResource`, renderer preparation code,
-or future extensions.
+Those belong to `PreparedScene`, renderer preparation code, or future
+extensions.
 
 ## Section 2.1 Data Facts
 
 The first scene data model is intentionally narrow:
 
 ```ts
-type DataObject =
-  | ScalarVolumeData
-  | LabelmapSegmentationData
+type DataObject = ScalarVolumeData
 ```
 
 Every data object should carry only facts:
@@ -58,6 +56,10 @@ textures, GPU buffers, and acceleration structures are prepared elsewhere.
 ```ts
 class ScalarVolumeData {
   readonly id: string
+  readonly source: {
+    readonly kind: 'nifti'
+    readonly uri?: string
+  }
   readonly shape: Vec3
   readonly data: ScalarVoxelArray
   readonly indexToWorld: Mat4
@@ -70,40 +72,20 @@ Meaning:
 - `data`: scalar voxel values, indexed as `x + nx * (y + ny * z)`.
 - `indexToWorld`: affine transform from voxel index coordinates to world coordinates.
 
-## Section 2.3 Labelmap Segmentation
+NIfTI rules for the MVP:
 
-A labelmap segmentation is a 3D integer array whose voxel value is the segment
-index. Segment index `0` means background.
+- The only required input format is `.nii` or `.nii.gz`.
+- NIfTI header dimensions, voxel spacing, orientation, and affine metadata are
+  preserved when creating `ScalarVolumeData`.
+- Voxel index coordinates are center-based: integer index `[i, j, k]` refers to
+  the center of that voxel.
+- World coordinates follow the NIfTI / medical image coordinate convention
+  expressed by the selected NIfTI affine.
+- If the NIfTI image lacks usable affine information, the loader must either
+  construct the documented fallback affine from spacing metadata or fail with an
+  explicit loader error.
 
-```ts
-class LabelmapSegmentationData {
-  readonly id: string
-  readonly referenceVolumeId: string
-  readonly shape: Vec3
-  readonly labels: Uint8Array | Uint16Array | Uint32Array
-  readonly indexToWorld: Mat4
-  readonly segments: Map<number, Segment>
-}
-
-interface Segment {
-  readonly segmentIndex: number
-  label: string
-  locked: boolean
-  cachedStats?: Record<string, unknown>
-}
-```
-
-Rules:
-
-- Labelmap geometry should match the referenced scalar volume unless a future
-  resampling step is added explicitly.
-- Segment visibility, color LUT, opacity, and active segment are renderer/tool
-  state, not labelmap data facts.
-- Labelmap editing should mark dirty regions, not force full texture upload.
-- Other segmentation representations are out of scope for the first
-  implementation.
-
-## Section 2.4 Scene Object
+## Section 2.3 Scene Object
 
 ```ts
 class Scene {
@@ -113,24 +95,18 @@ class Scene {
   version: number
 
   readonly volumes: Map<string, ScalarVolumeData>
-  readonly labelmaps: Map<string, LabelmapSegmentationData>
 
   addVolume(volume: ScalarVolumeData): void
   removeVolume(volumeId: string): void
-
-  addLabelmap(labelmap: LabelmapSegmentationData): void
-  removeLabelmap(labelmapId: string): void
 
   transaction<T>(fn: (tx: SceneTransaction) => T): SceneChangeSet<T>
 
   volumeIndexToWorld(volumeId: string, index: Vec3): Vec3
   worldToVolumeIndex(volumeId: string, world: Vec3): Vec3
-  labelmapIndexToWorld(labelmapId: string, index: Vec3): Vec3
-  worldToLabelmapIndex(labelmapId: string, world: Vec3): Vec3
 }
 ```
 
-## Section 2.5 SceneChangeSet
+## Section 2.4 SceneChangeSet
 
 Scene mutation should be explicit enough for incremental preparation:
 
@@ -146,62 +122,63 @@ interface SceneChangeSet<T = unknown> {
 type SceneChange =
   | { type: 'volume.added' | 'volume.removed'; volumeId: string }
   | { type: 'volume.changed'; volumeId: string; regions?: Box3i[] }
-  | { type: 'labelmap.added' | 'labelmap.removed'; labelmapId: string }
-  | { type: 'labelmap.metadataChanged'; labelmapId: string; segmentIndices?: number[] }
-  | {
-      type: 'labelmap.voxelsChanged'
-      labelmapId: string
-      regions?: Box3i[]
-      segmentIndices?: number[]
-    }
 ```
 
 `SceneChangeSet` is the contract between the authoritative model and renderer
 caches. A scene should not call renderers directly.
 
-Example brush edit:
-
-```ts
-const changeSet = scene.transaction(tx => {
-  tx.updateLabelmapRegion({
-    labelmapId,
-    segmentIndex,
-    regions: [dirtyBox],
-    write(labels) {
-      // mutate CPU labelmap values
-    },
-  })
-})
-```
-
-The transaction records a `labelmap.voxelsChanged` change. The renderer cache
-later decides whether that means a partial texture upload, a LUT update, or a
-full prepared-resource rebuild.
-
 ```ts
 interface SceneTransaction {
   addVolume(volume: ScalarVolumeData): void
   updateVolume(volumeId: string, regions?: Box3i[]): void
-  addLabelmap(labelmap: LabelmapSegmentationData): void
-  updateLabelmapMetadata(labelmapId: string, segmentIndices?: number[]): void
-  updateLabelmapRegion(input: {
-    labelmapId: string
-    segmentIndex?: number
-    regions?: Box3i[]
-    write(labels: Uint8Array | Uint16Array | Uint32Array): void
-  }): void
 }
 ```
+
+Transaction rules for the MVP:
+
+- A transaction is synchronous.
+- If the transaction callback throws, the scene should not emit a
+  `SceneChangeSet`.
+- A missing `regions` field means the whole referenced object is dirty.
+- An empty `regions` array means no voxel region changed and should be avoided.
+- Multiple dirty boxes in one transaction may be merged before GPU upload.
+
+## Section 2.5 Lifetime
+
+For the MVP, scene and GPU-resource lifetime are coupled to NIfTI loading:
+
+```text
+load NIfTI
+  -> create Scene and ScalarVolumeData
+  -> create PreparedScene GPU resources on first render
+destroy Scene
+  -> release all PreparedScene GPU resources derived from that Scene
+```
+
+`Scene` owns CPU data only. `Engine` owns prepared GPU resources and must release
+them when the active scene is destroyed or replaced.
 
 ## Section 2.6 Render Order
 
 For the first implementation, render order is fixed:
 
 ```text
-1. Scalar volume
-2. Labelmap overlay
+1. Scalar volume MPR
 ```
 
 This avoids introducing a general scene graph before the renderer needs it.
-Future data types can add their own scene model extensions without changing the
-basic `SceneChangeSet` pattern.
+Future labelmap or surface data types can add their own scene model extensions
+without changing the basic `SceneChangeSet` pattern.
+
+## Section 2.7 Future Scene Extensions
+
+The following concepts are intentionally out of scope for the MVP:
+
+```text
+LabelmapSegmentationData
+segment metadata
+labelmap voxel dirty regions
+annotation objects
+surface objects
+multiple scene graphs
+```

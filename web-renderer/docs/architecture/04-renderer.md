@@ -1,41 +1,32 @@
 # Section 4. Renderer
 
-## Section 4.1 Renderer
+## Section 4.1 MprRenderer
 
-`Renderer` draws an already-prepared scene into a viewport.
+The MVP renderer is a concrete `MprRenderer`, not a generic renderer/pipeline
+framework.
 
 ```ts
-interface Renderer {
-  readonly id: string
-  canRender(scene: Scene, viewport: Viewport, renderState: RenderState): boolean
+class MprRenderer {
   prepareScene(scene: Scene, previous?: PreparedScene): PreparedScene
-  render(preparedScene: PreparedScene, viewport: Viewport, renderState: RenderState): void
+  render(preparedScene: PreparedScene, viewport: Viewport, state: MprRenderState): void
   releasePreparedScene(preparedScene: PreparedScene): void
 }
 ```
 
-Application code should normally render through the engine:
+`MprRenderer` is responsible for:
 
-```ts
-engine.render(sceneId, viewportId, renderState)
+```text
+creating scalar volume GPU textures
+updating uniforms from MprRenderState
+drawing scalar MPR image
+releasing prepared GPU resources
 ```
 
-The engine resolves scene/viewport/renderer and calls the renderer with a
-`PreparedScene`.
+It should not mutate `Scene`.
 
-## Section 4.2 RenderState
+## Section 4.2 MprRenderState
 
-`RenderState` describes how one renderer should draw one scene into one
-viewport. It combines geometric viewing state and display mapping state, and
-its concrete shape is renderer-specific.
-
-```ts
-type RenderState =
-  | MprRenderState
-  | VolumeRenderState
-```
-
-Example MPR state:
+`MprRenderState` describes how one viewport looks at the scene.
 
 ```ts
 interface MprRenderState {
@@ -57,61 +48,28 @@ interface MprRenderState {
       mode: 'mean' | 'max' | 'min'
     }
   }
-  labelmaps: {
-    [labelmapId: string]: {
-      colorLut: ColorLUT
-      opacity: number
-      outlineOnly: boolean
-      visibleSegments?: Set<number>
-      activeSegmentIndex?: number
-    }
-  }
-}
-```
-
-Example 3D volume state:
-
-```ts
-interface VolumeRenderState {
-  rendererKind: 'volume'
-  volumeId: string
-  camera: {
-    position: Vec3
-    target: Vec3
-    up: Vec3
-    fovY: number
-  }
-  transferFunction: TransferFunction
-  sampling: {
-    stepSize: number
-    interpolation: 'nearest' | 'linear'
-  }
 }
 ```
 
 Rules:
 
-- `Scene` owns scalar volume facts and labelmap segmentation facts.
-- `Viewport` owns the canvas-backed render target.
-- `RenderState` owns renderer-specific viewing and display choices.
-- Segment visibility, color LUT, opacity, and active segment live in `RenderState`.
-- Renderer-specific GPU uniforms are derived from `RenderState`.
-- Different renderers may define incompatible `RenderState` shapes.
+- MPR plane, window/level, interpolation, and slab settings live in
+  `MprRenderState`.
+- The MVP updates render state by replacing the complete `MprRenderState` for a
+  viewport. It does not require a patch or deep-merge render-state API.
+- The engine may expose direct helpers for common viewport operations, but the
+  resulting state remains an explicit `MprRenderState`.
 
 ## Section 4.3 PreparedScene
 
-`PreparedScene` is renderer-specific cache derived from a `Scene`. It is not
-business state and must not be stored on `Scene`.
+`PreparedScene` is the GPU cache derived from `Scene`.
 
 ```ts
 class PreparedScene {
-  readonly id: string
-  readonly rendererId: string
   readonly sourceSceneId: string
   sourceVersion: number
 
   preparedVolumes: Map<string, PreparedScalarVolume>
-  preparedLabelmaps: Map<string, PreparedLabelmap>
   pendingInvalidations: PreparedInvalidation[]
 }
 ```
@@ -119,132 +77,108 @@ class PreparedScene {
 Typical cached content:
 
 ```text
-uploaded scalar volume textures
-uploaded labelmap textures
+scalar volume textures
 texture views
+samplers
 bind groups
 uniform buffers
-dirty-region upload metadata
 ```
 
-`PreparedScene` is updated incrementally from `SceneChangeSet` invalidations.
-`Scene.version` is useful for sanity checks, but it is not enough to decide
-what can be updated incrementally.
+For the MVP, `PreparedScene` may be owned directly by `Engine`. A separate
+`PreparedSceneCache` is unnecessary until there are multiple scenes or renderer
+types.
 
-## Section 4.4 PreparedResource
-
-`PreparedResource` is a renderer/pipeline-specific GPU resource derived from a
-scene data fact.
-
-Examples:
-
-```text
-scalar volume texture
-labelmap texture
-histogram buffer
-downsampled scalar volume pyramid
-transfer function LUT
-```
+## Section 4.4 Prepared Resources
 
 ```ts
-interface PreparedResource {
-  readonly id: string
-  readonly sourceDataObjectId: string
-  readonly rendererId: string
-  readonly pipelineKey: string
-  version: number
+class PreparedScalarVolume {
+  readonly texture: GPUTexture
+  readonly textureView: GPUTextureView
+  readonly shape: Vec3
+  readonly indexToWorld: Mat4
   release(): void
-}
-
-class PreparedScalarVolume implements PreparedResource {
-  readonly texture: GPUTexture
-  readonly textureView: GPUTextureView
-  readonly shape: Vec3
-  readonly indexToWorld: Mat4
-}
-
-class PreparedLabelmap implements PreparedResource {
-  readonly texture: GPUTexture
-  readonly textureView: GPUTextureView
-  readonly shape: Vec3
-  readonly indexToWorld: Mat4
 }
 ```
 
 Prepared resources are caches. They must not be treated as duplicate source
 data.
 
-Prepared resources can carry pending invalidations:
-
 ```ts
 type PreparedInvalidation =
   | { type: 'volumeTextureDirty'; volumeId: string; regions?: Box3i[] }
-  | { type: 'labelmapTextureDirty'; labelmapId: string; regions?: Box3i[] }
-  | { type: 'labelmapMetadataDirty'; labelmapId: string; segmentIndices?: number[] }
   | { type: 'preparedSceneStructureDirty' }
 ```
 
-The renderer maps these invalidations to the cheapest safe update, such as
-`queue.writeTexture` for a dirty labelmap box.
+## Section 4.5 WebGPU Capability Rules
 
-## Section 4.5 Pipeline
-
-`Pipeline` implements a rendering technique over prepared volume and labelmap
-resources.
-
-Examples:
+The MVP requires WebGPU support. If the browser, adapter, device, scalar volume
+format, or required texture path is unsupported, initialization should fail with
+an explicit error instead of silently falling back to a different renderer.
 
 ```text
-MprSlicePipeline
-LabelmapOverlayPipeline
-VolumeRaymarchPipeline
+WebGPU unavailable                  -> fail
+required adapter missing            -> fail
+required texture format unsupported -> fail
+required shader path unsupported    -> fail
 ```
 
-```ts
-interface RenderPipeline {
-  prepare(scene: Scene, previous?: PreparedScene): PreparedScene
-  draw(context: DrawContext, preparedScene: PreparedScene, renderState: RenderState): void
-}
-```
+The first implementation may reject scalar voxel formats that cannot be uploaded
+or sampled through the selected MVP texture path. CPU-side NIfTI loading may
+still preserve the original typed array; renderer preparation decides whether it
+is supported.
 
-For the first implementation, a renderer may use one pipeline that draws the
-scalar volume and labelmap overlay together. Splitting the labelmap overlay into
-a separate pipeline is an implementation choice, not a `Scene` concern.
+## Section 4.6 NIfTI Volume Sampling Rules
 
-## Section 4.6 Render Flow
+Sampling rules:
+
+- Convert viewport canvas coordinates through the MPR plane into world space.
+- Convert world coordinates to NIfTI voxel index coordinates using the inverse
+  of `indexToWorld`.
+- Voxel index coordinates are center-based.
+- Use `nearest` or `linear` scalar interpolation according to `MprRenderState`.
+- Samples outside the volume bounds produce the configured background color.
+
+## Section 4.7 Render Flow
 
 ```text
-Scene transaction
-  -> SceneChangeSet
-MedicalRenderingEngine.applySceneChangeSet(changeSet)
-  -> PreparedSceneCache invalidates affected PreparedScene objects
-  -> SceneViewportIndex resolves affected viewports
-  -> RenderScheduler requests next-frame renders
-RenderScheduler flush
-  -> SceneManager resolves Scene
-  -> ViewportManager resolves Viewport
-  -> RenderStateStore resolves RenderState
-  -> RendererRegistry selects Renderer
-  -> PreparedSceneCache incrementally prepares or updates PreparedScene
-  -> Renderer draws PreparedScene
+NIfTI load
+  -> Scene and ScalarVolumeData
+Engine creates three MPR viewports and render states
+requestAnimationFrame flush
+  -> Engine resolves Viewport and MprRenderState
+  -> MprRenderer prepares or updates PreparedScene
+  -> MprRenderer draws scalar MPR
 Canvas output
-```
-
-Labelmap editing flow:
-
-```text
-BrushTool modifies LabelmapSegmentationData in Scene
-Scene transaction emits labelmap.voxelsChanged(regions)
-PreparedSceneCache marks prepared labelmap texture dirty
-RenderScheduler requests renders for viewports displaying that labelmap
-Next render uploads only dirty texture regions and reuses the scalar volume texture
 ```
 
 Render-state editing flow:
 
 ```text
-WindowLevelTool modifies MprRenderState.image.windowMin/windowMax
-RenderStateStore updates the viewport state
-RenderScheduler requests that viewport only
+MPR viewport interaction computes the next MprRenderState
+Engine replaces the viewport's MprRenderState
+Engine requests that viewport only
 Next render updates uniforms and reuses PreparedScene
 ```
+
+Scene lifetime flow:
+
+```text
+NIfTI load creates Scene
+First render creates PreparedScene GPU resources
+Scene destroy releases PreparedScene GPU resources
+```
+
+## Section 4.8 Future Renderer Extensions
+
+The following concepts are intentionally not part of the MVP renderer API:
+
+```text
+generic Renderer interface
+Pipeline registry
+VolumeRenderState
+Surface or contour passes
+Labelmap overlay pass
+shared PreparedSceneCache across renderer types
+```
+
+They can be added after the concrete three-direction MPR path is working.

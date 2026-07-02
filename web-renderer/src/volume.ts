@@ -14,11 +14,29 @@ export type ScalarVoxelArray =
   | Float64Array
 
 export class ScalarVolume {
+  readonly id: string
+  readonly source?: {
+    readonly kind: 'nifti'
+    readonly uri?: string
+  }
   readonly shape: Vec3
   readonly data: ScalarVoxelArray
   readonly indexToWorld: Mat4
 
-  constructor(shape: Vec3, data: ScalarVoxelArray, indexToWorld: Mat4) {
+  constructor(
+    shape: Vec3,
+    data: ScalarVoxelArray,
+    indexToWorld: Mat4,
+    options: {
+      id?: string
+      source?: {
+        readonly kind: 'nifti'
+        readonly uri?: string
+      }
+    } = {},
+  ) {
+    this.id = options.id ?? 'volume'
+    this.source = options.source
     this.shape = shape
     this.data = data
     this.indexToWorld = indexToWorld
@@ -36,6 +54,11 @@ export function indexToTexByShape(shape: Vec3): Mat4 {
 }
 
 export function createGPUTexture(device: GPUDevice, volume: ScalarVolume): GPUTexture {
+  const maxDim = device.limits.maxTextureDimension3D
+  if (volume.shape.some(dim => dim > maxDim)) {
+    throw new Error(`Volume dimensions ${volume.shape.join(' x ')} exceed WebGPU maxTextureDimension3D ${maxDim}.`)
+  }
+
   const texture = device.createTexture({
     size: volume.shape,
     dimension: '3d',

@@ -2,69 +2,73 @@ import mprShader from './shaders/mpr.wgsl?raw'
 import { mat4 } from 'wgpu-matrix'
 import { createGPUTexture } from '../volume'
 import type { Mat4 } from 'wgpu-matrix'
+import type { Scene } from '../scene'
 import type { ScalarVolume, Vec3 } from '../volume'
+import type { Viewport } from '../viewport'
+import type { MprRenderState } from './mprState'
 
-export interface MprPlane {
-  origin: Vec3
-  right: Vec3
-  up: Vec3
-  pixelSize: number
-  windowMin: number
-  windowMax: number
+const UNIFORM_BYTES = 176
+
+export class PreparedScene {
+  readonly sourceSceneId: string
+  sourceVersion: number
+  readonly preparedVolumes = new Map<string, PreparedScalarVolume>()
+  readonly pendingInvalidations: PreparedInvalidation[] = []
+
+  constructor(sourceSceneId: string, sourceVersion: number) {
+    this.sourceSceneId = sourceSceneId
+    this.sourceVersion = sourceVersion
+  }
+
+  release(): void {
+    for (const volume of this.preparedVolumes.values()) {
+      volume.release()
+    }
+    this.preparedVolumes.clear()
+    this.pendingInvalidations.length = 0
+  }
 }
 
-const UNIFORM_BYTES = 160
-type UploadedScalarVolume = {
-  texture: GPUTexture
-  shape: Vec3
-  indexToWorld: Mat4
+export class PreparedScalarVolume {
+  readonly texture: GPUTexture
+  readonly textureView: GPUTextureView
+  readonly shape: Vec3
+  readonly indexToWorld: Mat4
+
+  constructor(texture: GPUTexture, volume: ScalarVolume) {
+    this.texture = texture
+    this.textureView = texture.createView()
+    this.shape = volume.shape
+    this.indexToWorld = volume.indexToWorld
+  }
+
+  release(): void {
+    this.texture.destroy()
+  }
 }
+
+export type PreparedInvalidation =
+  | { type: 'volumeTextureDirty'; volumeId: string; regions?: unknown[] }
+  | { type: 'preparedSceneStructureDirty' }
 
 export class MprRenderer {
-  private readonly canvas: HTMLCanvasElement
-  private readonly device: GPUDevice
-  private readonly context: GPUCanvasContext
-  private readonly format: GPUTextureFormat
+  readonly device: GPUDevice
+  readonly format: GPUTextureFormat
   private readonly pipeline: GPURenderPipeline
   private readonly uniformBuffer: GPUBuffer
-  private readonly emptyTexture: GPUTexture
-  private bindGroup: GPUBindGroup | null = null
-  private volume: UploadedScalarVolume | null = null
-  private width = 1
-  private height = 1
 
-  private constructor(
-    canvas: HTMLCanvasElement,
-    device: GPUDevice,
-    context: GPUCanvasContext,
-    format: GPUTextureFormat,
-    pipeline: GPURenderPipeline,
-  ) {
-    this.canvas = canvas
+  private constructor(device: GPUDevice, format: GPUTextureFormat, pipeline: GPURenderPipeline) {
     this.device = device
-    this.context = context
     this.format = format
     this.pipeline = pipeline
     this.uniformBuffer = device.createBuffer({
+      label: 'MPR uniforms',
       size: UNIFORM_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    this.emptyTexture = device.createTexture({
-      size: [1, 1, 1],
-      dimension: '3d',
-      format: 'r32float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    })
-    this.device.queue.writeTexture(
-      { texture: this.emptyTexture },
-      new Float32Array([0]),
-      { bytesPerRow: 256, rowsPerImage: 1 },
-      [1, 1, 1],
-    )
-    this.configureCanvas()
   }
 
-  static async create(canvas: HTMLCanvasElement): Promise<MprRenderer> {
+  static async create(): Promise<MprRenderer> {
     if (!navigator.gpu) {
       throw new Error('WebGPU is not available in this browser.')
     }
@@ -73,14 +77,10 @@ export class MprRenderer {
       throw new Error('No WebGPU adapter was found.')
     }
     const device = await adapter.requestDevice()
-    const context = canvas.getContext('webgpu') as GPUCanvasContext | null
-    if (!context) {
-      throw new Error('Could not create a WebGPU canvas context.')
-    }
     const format = navigator.gpu.getPreferredCanvasFormat()
     const module = device.createShaderModule({ label: 'mpr.wgsl', code: mprShader })
     const pipeline = await device.createRenderPipelineAsync({
-      label: 'mpr render pipeline',
+      label: 'MPR render pipeline',
       layout: 'auto',
       vertex: {
         module,
@@ -93,29 +93,59 @@ export class MprRenderer {
       },
       primitive: { topology: 'triangle-list' },
     })
-    return new MprRenderer(canvas, device, context, format, pipeline)
+
+    return new MprRenderer(device, format, pipeline)
   }
 
-  setVolume(volume: ScalarVolume): void {
-    this.volume?.texture.destroy()
-    const texture = createGPUTexture(this.device, volume)
-    this.volume = {
-      texture,
-      shape: volume.shape,
-      indexToWorld: volume.indexToWorld,
+  prepareScene(scene: Scene, previous?: PreparedScene): PreparedScene {
+    const prepared = previous && previous.sourceSceneId === scene.id
+      ? previous
+      : new PreparedScene(scene.id, scene.version)
+
+    if (previous && prepared !== previous) {
+      previous.release()
     }
-    this.bindGroup = this.createBindGroup()
+
+    for (const [volumeId, volume] of scene.volumes) {
+      if (!prepared.preparedVolumes.has(volumeId)) {
+        prepared.preparedVolumes.set(volumeId, new PreparedScalarVolume(createGPUTexture(this.device, volume), volume))
+      }
+    }
+
+    for (const volumeId of [...prepared.preparedVolumes.keys()]) {
+      if (!scene.volumes.has(volumeId)) {
+        prepared.preparedVolumes.get(volumeId)?.release()
+        prepared.preparedVolumes.delete(volumeId)
+      }
+    }
+
+    prepared.sourceVersion = scene.version
+    prepared.pendingInvalidations.length = 0
+    return prepared
   }
 
-  render(plane: MprPlane): void {
-    this.resize()
-    this.writeUniforms(plane)
+  render(preparedScene: PreparedScene, viewport: Viewport, state: MprRenderState): void {
+    const volume = preparedScene.preparedVolumes.get(state.image.volumeId)
+    if (!volume) {
+      throw new Error(`Prepared volume not found: ${state.image.volumeId}`)
+    }
 
-    const encoder = this.device.createCommandEncoder()
+    viewport.resizeFromClient()
+    this.writeUniforms(volume, viewport, state)
+    const bindGroup = this.device.createBindGroup({
+      label: `MPR bind group ${viewport.id}`,
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: volume.textureView },
+      ],
+    })
+
+    const encoder = this.device.createCommandEncoder({ label: `MPR render ${viewport.id}` })
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
+          view: viewport.getCurrentTextureView(),
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: 'clear',
           storeOp: 'store',
@@ -123,65 +153,37 @@ export class MprRenderer {
       ],
     })
     pass.setPipeline(this.pipeline)
-    pass.setBindGroup(0, this.bindGroup ?? this.createBindGroup())
+    pass.setBindGroup(0, bindGroup)
     pass.draw(3)
     pass.end()
     this.device.queue.submit([encoder.finish()])
   }
 
-  private configureCanvas(): void {
-    this.context.configure({
-      device: this.device,
-      format: this.format,
-      alphaMode: 'opaque',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    })
+  releasePreparedScene(preparedScene: PreparedScene): void {
+    preparedScene.release()
   }
 
-  private resize(): void {
-    const rect = this.canvas.getBoundingClientRect()
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-    const width = Math.max(1, Math.floor(rect.width * dpr))
-    const height = Math.max(1, Math.floor(rect.height * dpr))
-    if (width === this.width && height === this.height) {
-      return
-    }
-    this.width = width
-    this.height = height
-    this.canvas.width = width
-    this.canvas.height = height
-    this.configureCanvas()
+  destroy(): void {
+    this.uniformBuffer.destroy()
   }
 
-  private createBindGroup(): GPUBindGroup {
-    const volume = this.volume
-    return this.device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: (volume?.texture ?? this.emptyTexture).createView() },
-      ],
-    })
-  }
-
-  private writeUniforms(plane: MprPlane): void {
-    const volume = this.volume
-    const dims = volume?.shape ?? [1, 1, 1]
-    const worldToIndex = volume ? mat4.inverse(volume.indexToWorld) : mat4.identity()
+  private writeUniforms(volume: PreparedScalarVolume, viewport: Viewport, state: MprRenderState): void {
+    const worldToIndex = mat4.inverse(volume.indexToWorld)
     const data = new ArrayBuffer(UNIFORM_BYTES)
     const f32 = new Float32Array(data)
     const u32 = new Uint32Array(data)
 
-    f32.set([...plane.origin, 0], 0)
-    f32.set([...plane.right, 0], 4)
-    f32.set([...plane.up, 0], 8)
+    f32.set([...state.plane.origin, 0], 0)
+    f32.set([...state.plane.right, 0], 4)
+    f32.set([...state.plane.up, 0], 8)
     f32.set([worldToIndex[0], worldToIndex[4], worldToIndex[8], worldToIndex[12]], 12)
     f32.set([worldToIndex[1], worldToIndex[5], worldToIndex[9], worldToIndex[13]], 16)
     f32.set([worldToIndex[2], worldToIndex[6], worldToIndex[10], worldToIndex[14]], 20)
     f32.set([worldToIndex[3], worldToIndex[7], worldToIndex[11], worldToIndex[15]], 24)
-    u32.set([dims[0], dims[1], dims[2], 0], 28)
-    f32.set([this.width, this.height, 0, 0], 32)
-    f32.set([plane.windowMin, plane.windowMax, plane.pixelSize, 0], 36)
+    u32.set([volume.shape[0], volume.shape[1], volume.shape[2], 0], 28)
+    f32.set([viewport.width, viewport.height, 0, 0], 32)
+    f32.set([state.image.windowMin, state.image.windowMax, state.plane.pixelSize, 0], 36)
+    u32.set([state.image.interpolation === 'linear' ? 1 : 0, 0, 0, 0], 40)
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, data)
   }

@@ -1,23 +1,21 @@
-# Section 6. User Input and Interaction
+# Section 6. User Input And Interaction
 
-This chapter describes how external user input becomes scene changes, render
-state changes, synchronized viewport updates, and render scheduling.
+This chapter describes how external user input becomes MPR viewport state
+changes.
 
-The interaction system should follow this direction:
+The MVP interaction path is:
 
 ```text
 DOM input
   -> InputRouter
-  -> ToolController
-  -> Tool
-  -> CommandDispatcher
-  -> SceneTransaction or RenderStateStore patch
-  -> RenderStateLink propagation
-  -> RenderScheduler
+  -> Engine
+  -> set complete MprRenderState for the viewport
+  -> Engine.requestRender
 ```
 
-The important rule is that input handling should not bypass the engine. Tools
-interpret input. Commands express intent. The engine commits state changes.
+Input handling should not bypass the engine. The MVP does not need a tool
+registry or command dispatcher; viewport operations can compute the next
+`MprRenderState` and set it directly through the engine.
 
 ## Section 6.1 InputRouter
 
@@ -44,149 +42,65 @@ interface InteractionEvent {
 }
 ```
 
-`InputRouter` should not know medical tools, scene mutation rules, or renderer
-internals.
+`InputRouter` should not know renderer internals. It may route normalized
+viewport events to small MPR interaction handlers.
 
-## Section 6.2 Tools
+## Section 6.2 MPR Viewport Operations
 
-Tools interpret interaction events and produce commands. They should not
-directly own render pipelines or GPU resources.
-
-```ts
-interface Tool<TConfig = unknown> {
-  readonly name: string
-  readonly configuration: TConfig
-  onInteraction(evt: InteractionEvent, context: ToolContext): ToolCommand | ToolCommand[] | void
-}
-
-interface ToolContext {
-  sceneId: string
-  viewportId: string
-  renderState: RenderState
-  picking: PickingService
-}
-```
-
-Examples:
-
-```text
-PanTool
-ZoomTool
-WindowLevelTool
-CrosshairsTool
-BrushTool
-RegionSegmentTool
-```
-
-## Section 6.3 ToolController
-
-`ToolController` selects which tool receives an interaction event.
+MVP interactions operate only on `MprRenderState`. They should not mutate
+`Scene`, own GPU resources, or call renderer methods directly.
 
 ```ts
-type ToolMode = 'Active' | 'Passive' | 'Enabled' | 'Disabled'
-
-interface ToolBinding {
-  toolName: string
-  bindings: { mouseButton?: MouseButton; key?: string; modifier?: KeyModifier }[]
-}
-
-class ToolController {
-  readonly toolGroupId: string
-  readonly viewportIds: string[]
-
-  setToolMode(toolName: string, mode: ToolMode): void
-  setPrimaryActiveTool(toolName: string): void
-  setToolBindings(toolName: string, bindings: ToolBinding[]): void
-  dispatch(evt: InteractionEvent): boolean
+interface MprInteractionContext {
+  scene: Scene
+  viewport: Viewport
+  renderState: MprRenderState
+  pick(canvasPoint: Vec2): PickResult
 }
 ```
 
-Dispatch order:
+MVP viewport operations:
 
 ```text
-1. primary active tool
-2. other active tools
-3. passive tools
-4. enabled tools
+pan MPR plane
+zoom MPR plane by changing pixelSize
+scroll or move through the MPR normal
+adjust window/level
+reset axial, sagittal, and coronal states from the loaded NIfTI volume
 ```
 
-`ToolRegistry` may still exist as a registry of tool classes, but it is not the
-state owner. `ToolController` owns active tool state for a viewport group.
-
-## Section 6.4 Commands
-
-Tools should return semantic commands instead of mutating every subsystem
-directly.
-
-```ts
-type ToolCommand =
-  | { type: 'renderState.patch'; viewportId: string; patch: RenderStatePatch }
-  | { type: 'scene.transaction'; sceneId: string; apply(tx: SceneTransaction): void }
-  | { type: 'labelmap.paint'; sceneId: string; input: PaintInput }
-
-class CommandDispatcher {
-  dispatch(command: ToolCommand): void
-}
-```
-
-Command handlers commit changes through the engine:
+Each operation computes a complete next `MprRenderState` and passes it to:
 
 ```text
-scene.transaction(...)
-engine.applySceneChangeSet(changeSet)
-
-engine.updateRenderState(viewportId, patch)
+engine.setRenderState(viewportId, nextState)
+engine.requestRender(viewportId)
 ```
 
-This keeps undo/redo, testing, synchronization, and render scheduling in one
-predictable path.
+## Section 6.3 Three-Direction MPR Setup
 
-## Section 6.5 RenderState Synchronization
-
-Synchronization should propagate committed render-state patches, not raw DOM
-events.
-
-```ts
-class RenderStateLink {
-  readonly id: string
-  readonly sourceViewportId: string
-  readonly targetViewportIds: string[]
-  readonly selector: RenderStateSelector
-
-  transform(input: {
-    patch: RenderStatePatch
-    source: RenderState
-    target: RenderState
-  }): RenderStatePatch | null
-}
-
-interface RenderStateSelector {
-  camera?: Partial<CameraSyncFields>
-  transfer?: Partial<TransferSyncFields>
-  labelmap?: Partial<LabelmapSyncFields>
-}
-```
-
-Common synchronizable fields:
+After loading a NIfTI volume, the MVP creates three render states:
 
 ```text
-slice position
-camera orientation
-zoom and pan
-window/level
-colormap
-slab thickness
-labelmap visibility
-segment visibility
+axial    plane normal follows the volume k axis
+coronal  plane normal follows the volume j axis
+sagittal plane normal follows the volume i axis
 ```
 
-Flow:
+The exact world-space `origin`, `right`, `up`, and `pixelSize` values are derived
+from the NIfTI affine and volume shape. Voxel index coordinates are center-based.
+
+## Section 6.4 Future Interaction Extensions
+
+These concepts are useful later but should not be required for the MVP:
 
 ```text
-source RenderState patch committed
-  -> RenderStateLink computes target patches
-  -> engine.updateRenderState(targetViewportId, targetPatch)
-  -> RenderScheduler requests target viewport renders
+ToolController
+ToolRegistry
+CommandDispatcher
+RenderStateLink
+multi-viewport synchronization policies
+undo/redo command history
+labelmap brush editing
 ```
 
-This replaces event-driven synchronizers as the primary synchronization model.
+They can be added after the first three-direction MPR viewer is working.
