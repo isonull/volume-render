@@ -1,8 +1,10 @@
 import * as nifti from 'nifti-reader-js'
 import { NIFTI1 } from 'nifti-reader-js'
-import { mat4, type Mat4 } from 'wgpu-matrix'
+import { mat4, vec3, type Mat4, type Vec3, type Vec3n } from 'wgpu-matrix'
+import { LabelmapSegmentationData } from '../segmentation'
+import type { LabelmapVoxelArray, Segment } from '../segmentation'
 import { ScalarVolume } from '../volume'
-import type { ScalarVoxelArray, Vec3 } from '../volume'
+import type { ScalarVoxelArray } from '../volume'
 
 type NiftiHeader = ReturnType<typeof nifti.readHeader>
 
@@ -20,7 +22,7 @@ type NiftiDataKind =
 interface NiftiLayout {
   dimCount: number
   spatialRank: 1 | 2 | 3
-  spatialShape: Vec3
+  spatialShape: Vec3n
   extraShape: number[]
   voxelComponents: number
   voxelCount: number
@@ -84,7 +86,7 @@ export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile, fileName?: strin
   const data = convertImageToScalarArray(header, image, voxelCount, slope, intercept)
 
   return new ScalarVolume(dims, data, indexToWorld, {
-    id: 'volume',
+    id: volumeIdFromFileName(fileName),
     source: {
       kind: 'nifti',
       uri: fileName,
@@ -92,9 +94,85 @@ export function scalarVolumeFromNiftiFile(niftiFile: NiftiFile, fileName?: strin
   })
 }
 
+function volumeIdFromFileName(fileName?: string): string {
+  if (!fileName) {
+    return 'volume'
+  }
+  const base = fileName
+    .replace(/\.nii(?:\.gz)?$/i, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return base ? `volume-${base}` : 'volume'
+}
+
+export function indexToWorldFromNiftiFile(niftiFile: NiftiFile): Mat4 {
+  const layout = parseNiftiLayout(niftiFile.header)
+  return getIndexToWorld(niftiFile.header, layout.spatialShape)
+}
+
+export function labelmapSegmentationFromNiftiFile(
+  niftiFile: NiftiFile,
+  sourceVolume: ScalarVolume,
+  fileName?: string,
+): LabelmapSegmentationData {
+  const { header, image } = niftiFile
+  const layout = parseNiftiLayout(header)
+  const kind = classifyNifti(header, layout)
+
+  if (layout.spatialRank !== 3) {
+    throw new Error(`Cannot convert ${layout.spatialRank}D spatial NIfTI to LabelmapSegmentationData.`)
+  }
+
+  if (layout.extraShape.some(dim => dim > 1)) {
+    throw new Error(
+      `Cannot convert NIfTI segmentation with extra dimensions (${layout.extraShape.join(' x ')}) to a single labelmap.`,
+    )
+  }
+
+  if (kind !== 'labelmap' && kind !== 'scalar-volume') {
+    throw new Error(`Cannot convert ${kind} NIfTI to LabelmapSegmentationData.`)
+  }
+
+  const indexToWorld = getIndexToWorld(header, layout.spatialShape)
+  if (!sameShape(layout.spatialShape, sourceVolume.shape)) {
+    throw new Error(
+      `Segmentation shape ${layout.spatialShape.join(' x ')} does not match image shape ${sourceVolume.shape.join(' x ')}.`,
+    )
+  }
+  if (!sameMat4(indexToWorld, sourceVolume.indexToWorld)) {
+    throw new Error('Segmentation affine does not exactly match image affine.')
+  }
+
+  const labels = convertImageToLabelmapArray(header, image, layout.voxelCount)
+  return LabelmapSegmentationData.createFromVolume(sourceVolume, {
+    id: segmentationIdFromFileName(sourceVolume.id, fileName),
+    data: labels,
+    segments: createSegments(labels, fileName),
+  })
+}
+
+function segmentationIdFromFileName(sourceVolumeId: string, fileName?: string): string {
+  if (!fileName) {
+    return `${sourceVolumeId}-segmentation`
+  }
+  const base = fileName
+    .replace(/\.nii(?:\.gz)?$/i, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return base ? `${sourceVolumeId}-segmentation-${base}` : `${sourceVolumeId}-segmentation`
+}
+
+function sameShape(a: Vec3n, b: Vec3n): boolean {
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+}
+
+function sameMat4(a: Mat4, b: Mat4): boolean {
+  return a.every((value, index) => value === b[index])
+}
+
 function parseNiftiLayout(header: NiftiHeader): NiftiLayout {
   const dimCount = Math.max(0, header.dims[0] ?? 0)
-  const spatialShape: Vec3 = [
+  const spatialShape: Vec3n = [
     Math.max(1, header.dims[1] ?? 1),
     Math.max(1, header.dims[2] ?? 1),
     Math.max(1, header.dims[3] ?? 1),
@@ -122,6 +200,88 @@ function parseNiftiLayout(header: NiftiHeader): NiftiLayout {
     extraShape,
     voxelComponents,
     voxelCount,
+  }
+}
+
+function convertImageToLabelmapArray(
+  header: NiftiHeader,
+  image: ArrayBuffer,
+  voxelCount: number,
+): LabelmapVoxelArray {
+  if (!isScalarDatatype(header.datatypeCode)) {
+    throw new Error(`Cannot convert datatype ${describeDatatype(header.datatypeCode)} to labelmap.`)
+  }
+
+  const view = new DataView(image)
+  const littleEndian = header.littleEndian
+  let maxLabel = 0
+  const values = new Uint32Array(voxelCount)
+
+  for (let i = 0; i < voxelCount; i += 1) {
+    const value = readVoxel(view, i, header.datatypeCode, littleEndian)
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`Labelmap voxel ${i} has non-integer or negative label value ${value}.`)
+    }
+    if (value > 0xffffffff) {
+      throw new Error(`Labelmap voxel ${i} label value ${value} exceeds Uint32 range.`)
+    }
+    values[i] = value
+    maxLabel = Math.max(maxLabel, value)
+  }
+
+  if (maxLabel <= 0xff) {
+    return new Uint8Array(values)
+  }
+  if (maxLabel <= 0xffff) {
+    return new Uint16Array(values)
+  }
+  return values
+}
+
+function createSegments(data: LabelmapVoxelArray, fileName?: string): Segment[] {
+  const labels = new Set<number>()
+  for (const label of data) {
+    if (label > 0) {
+      labels.add(label)
+    }
+  }
+
+  return [...labels].sort((a, b) => a - b).map(label => ({
+    label,
+    name: `${fileName ?? 'Segmentation'} label ${label}`,
+    color: segmentColor(label),
+    opacity: 0.55,
+    visible: true,
+    locked: false,
+  }))
+}
+
+function segmentColor(label: number): [number, number, number] {
+  const hue = (label * 0.61803398875) % 1
+  const [r, g, b] = hsvToRgb(hue, 0.72, 0.95)
+  return [r, g, b]
+}
+
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const i = Math.floor(h * 6)
+  const f = h * 6 - i
+  const p = v * (1 - s)
+  const q = v * (1 - f * s)
+  const t = v * (1 - (1 - f) * s)
+
+  switch (i % 6) {
+    case 0:
+      return [v, t, p]
+    case 1:
+      return [q, v, p]
+    case 2:
+      return [p, v, t]
+    case 3:
+      return [p, q, v]
+    case 4:
+      return [t, p, v]
+    default:
+      return [v, p, q]
   }
 }
 
@@ -277,24 +437,24 @@ function describeDatatype(datatypeCode: number): string {
 }
 
 function getSpacing(header: NiftiHeader): Vec3 {
-  return [
+  return vec3.create(
     Math.abs(header.pixDims[1] || 1),
     Math.abs(header.pixDims[2] || 1),
     Math.abs(header.pixDims[3] || 1),
-  ]
+  )
 }
 
-function getIndexToWorld(header: NiftiHeader, spatialShape: Vec3): Mat4 {
+function getIndexToWorld(header: NiftiHeader, spatialShape: Vec3n): Mat4 {
   if (header.affine?.length === 4 && header.affine.every(row => row.length === 4)) {
     return niftiAffineRowsToMat4(header.affine)
   }
 
   const spacing = getSpacing(header)
-  const center: Vec3 = [
+  const center = vec3.create(
     -0.5 * (spatialShape[0] - 1) * spacing[0],
     -0.5 * (spatialShape[1] - 1) * spacing[1],
     -0.5 * (spatialShape[2] - 1) * spacing[2],
-  ]
+  )
 
   return mat4.set(
     spacing[0], 0, 0, 0,

@@ -143,10 +143,14 @@ legend {
   font-weight: 560;
 }
 
-.file-picker {
+.file-actions {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 18px;
+}
+
+.hidden-file-input {
+  display: none;
 }
 
 input {
@@ -187,6 +191,118 @@ input[type="file"] {
   margin-top: 12px;
 }
 
+.scene-browser {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #26303d;
+}
+
+.scene-browser h2 {
+  margin: 0 0 10px;
+  color: #f0f4fa;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.scene-browser p {
+  color: #8f9bad;
+}
+
+.scene-browser ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scene-browser details > ul {
+  margin-top: 6px;
+  padding-left: 14px;
+}
+
+.scene-item {
+  display: grid;
+  width: 100%;
+  min-height: 42px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  border: 1px solid #26303d;
+  border-radius: 6px;
+  background: #0c1016;
+  padding: 8px 10px;
+  color: #e3e8f0;
+  text-align: left;
+}
+
+.scene-item span {
+  overflow: hidden;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-item small {
+  overflow: hidden;
+  color: #8f9bad;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-item:hover {
+  border-color: #3a4454;
+  background: #121822;
+}
+
+.scene-item-volume {
+  cursor: default;
+}
+
+summary.scene-item {
+  list-style: none;
+}
+
+summary.scene-item::-webkit-details-marker {
+  display: none;
+}
+
+summary.scene-item::before {
+  content: "▾";
+  position: absolute;
+  margin-left: -16px;
+  color: #8f9bad;
+}
+
+details:not([open]) > summary.scene-item::before {
+  content: "▸";
+}
+
+.scene-item-segmentation {
+  cursor: context-menu;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  min-width: 132px;
+  overflow: hidden;
+  border: 1px solid #3a4454;
+  border-radius: 6px;
+  background: #11151b;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.36);
+}
+
+.context-menu button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 9px 12px;
+  text-align: left;
+}
+
 fieldset {
   border: 1px solid #26303d;
   border-radius: 8px;
@@ -222,6 +338,22 @@ fieldset {
   margin: 0;
   color: #e3e8f0;
   overflow-wrap: anywhere;
+}
+
+.info .matrix-row {
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+
+.info pre {
+  margin: 0;
+  overflow-x: auto;
+  border: 1px solid #26303d;
+  border-radius: 6px;
+  background: #0c1016;
+  padding: 8px;
+  color: #dce4ef;
+  font: 12px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 @media (max-width: 860px) {

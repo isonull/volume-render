@@ -1,7 +1,5 @@
 import { mat4 } from 'wgpu-matrix'
-import type { Mat4, Vec3Type } from 'wgpu-matrix'
-
-export type Vec3 = Vec3Type<[number, number, number]>
+import type { Mat4, Vec3n } from 'wgpu-matrix'
 
 export type ScalarVoxelArray =
   | Uint8Array
@@ -19,12 +17,12 @@ export class ScalarVolume {
     readonly kind: 'nifti'
     readonly uri?: string
   }
-  readonly shape: Vec3
+  readonly shape: Vec3n
   readonly data: ScalarVoxelArray
   readonly indexToWorld: Mat4
 
   constructor(
-    shape: Vec3,
+    shape: Vec3n,
     data: ScalarVoxelArray,
     indexToWorld: Mat4,
     options: {
@@ -43,7 +41,7 @@ export class ScalarVolume {
   }
 }
 
-export function indexToTexByShape(shape: Vec3): Mat4 {
+export function indexToTexByShape(shape: Vec3n): Mat4 {
   const [dx, dy, dz] = shape
   return mat4.set(
     1 / dx, 0, 0, 0,

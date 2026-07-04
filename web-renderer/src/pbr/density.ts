@@ -1,4 +1,5 @@
-import type { ScalarVolume, Vec3 } from '../volume'
+import type { Vec3n } from 'wgpu-matrix'
+import type { ScalarVolume } from '../volume'
 import type { DensityVolume } from './types'
 
 export interface DensityOptions {
@@ -15,7 +16,7 @@ export function createDensityVolume(
   const { data, shape: sourceDims } = volume
   const sourceMax = Math.max(...sourceDims)
   const factor = sourceMax > maxDim ? maxDim / sourceMax : 1
-  const dims: Vec3 = [
+  const dims: Vec3n = [
     Math.max(1, Math.round(sourceDims[0] * factor)),
     Math.max(1, Math.round(sourceDims[1] * factor)),
     Math.max(1, Math.round(sourceDims[2] * factor)),

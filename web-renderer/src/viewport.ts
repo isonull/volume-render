@@ -1,4 +1,4 @@
-import type { Vec2 } from './types'
+import type { Vec2n } from 'wgpu-matrix'
 
 export class Viewport {
   readonly id: string
@@ -49,7 +49,24 @@ export class Viewport {
     return this.context.getCurrentTexture().createView()
   }
 
-  clientToCanvas(point: Vec2): Vec2 {
+  clear(color: GPUColor = { r: 0, g: 0, b: 0, a: 1 }): void {
+    this.resizeFromClient()
+    const encoder = this.device.createCommandEncoder({ label: `Clear viewport ${this.id}` })
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.getCurrentTextureView(),
+          clearValue: color,
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    })
+    pass.end()
+    this.device.queue.submit([encoder.finish()])
+  }
+
+  clientToCanvas(point: Vec2n): Vec2n {
     const rect = this.canvas.getBoundingClientRect()
     return [
       (point[0] - rect.left) * this.pixelRatio,
@@ -57,7 +74,7 @@ export class Viewport {
     ]
   }
 
-  canvasToClient(point: Vec2): Vec2 {
+  canvasToClient(point: Vec2n): Vec2n {
     const rect = this.canvas.getBoundingClientRect()
     return [
       point[0] / this.pixelRatio + rect.left,

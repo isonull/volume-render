@@ -2,7 +2,8 @@ import renderSampleShader from './shaders/renderSample.wgsl?raw'
 import presentShader from './shaders/present.wgsl?raw'
 import { PerspectiveCamera, packCameraUniform } from './camera'
 import { packDensityR8 } from './density'
-import type { Vec3 } from '../volume'
+import { vec3 } from 'wgpu-matrix'
+import type { Vec3, Vec3n } from 'wgpu-matrix'
 import type { DensityVolume, MajorantGrid } from './types'
 
 export interface RendererParams {
@@ -19,8 +20,8 @@ export type RendererErrorHandler = (message: string) => void
 interface GpuVolume {
   densityTexture: GPUTexture
   majorantBuffer: GPUBuffer
-  dims: Vec3
-  majorantDims: Vec3
+  dims: Vec3n
+  majorantDims: Vec3n
   globalMaxDensity: number
 }
 
@@ -308,7 +309,7 @@ export class VolumeRenderer {
     const camera = new PerspectiveCamera({
       resolution: [this.width, this.height],
       position: this.cameraPosition(),
-      target: [0, 0, 0],
+      target: vec3.create(0, 0, 0),
       fovYDegrees: 45,
       near: 0.01,
       far: 20,
@@ -367,11 +368,11 @@ export class VolumeRenderer {
 
   private cameraPosition(): Vec3 {
     const cp = Math.cos(this.orbitPitch)
-    return [
+    return vec3.create(
       this.orbitDistance * Math.sin(this.orbitYaw) * cp,
       this.orbitDistance * Math.sin(this.orbitPitch),
       this.orbitDistance * Math.cos(this.orbitYaw) * cp,
-    ]
+    )
   }
 }
 

@@ -1,7 +1,7 @@
 import './style.css'
-import { mat4 } from 'wgpu-matrix'
+import { mat4, vec3 } from 'wgpu-matrix'
+import type { Vec3n } from 'wgpu-matrix'
 import { ScalarVolume } from './volume'
-import type { Vec3 } from './volume'
 import type { VolumeRenderer, RendererParams } from './pbr/renderer'
 
 const app = document.querySelector<HTMLDivElement>('#app')
@@ -144,7 +144,7 @@ function frame(): void {
 }
 
 async function loadTestSphere(): Promise<void> {
-  const dims: Vec3 = [96, 96, 96]
+  const dims: Vec3n = [96, 96, 96]
   const data = new Float32Array(dims[0] * dims[1] * dims[2])
   for (let z = 0; z < dims[2]; z += 1) {
     const nz = (z / (dims[2] - 1)) * 2 - 1
@@ -196,16 +196,16 @@ async function getVolumeModules(): Promise<NonNullable<typeof volumeModules>> {
 
 function readParams(): RendererParams {
   return {
-    sigmaA: [readNumber('sigma-a-r'), readNumber('sigma-a-g'), readNumber('sigma-a-b')],
-    sigmaS: [readNumber('sigma-s-r'), readNumber('sigma-s-g'), readNumber('sigma-s-b')],
+    sigmaA: vec3.create(readNumber('sigma-a-r'), readNumber('sigma-a-g'), readNumber('sigma-a-b')),
+    sigmaS: vec3.create(readNumber('sigma-s-r'), readNumber('sigma-s-g'), readNumber('sigma-s-b')),
     scale: readNumber('scale'),
     g: readNumber('g'),
     maxDepth: Math.max(1, Math.floor(readNumber('max-depth'))),
-    environmentL: [0.04, 0.05, 0.07],
+    environmentL: vec3.create(0.04, 0.05, 0.07),
   }
 }
 
-function renderVolumeInfo(volume: ScalarVolume, densityDims: Vec3, majorantMax: number): void {
+function renderVolumeInfo(volume: ScalarVolume, densityDims: Vec3n, majorantMax: number): void {
   const [min, max] = valueRange(volume)
   volumeInfoEl.innerHTML = `
     <div><dt>Volume</dt><dd>${volume.shape.join(' x ')}</dd></div>

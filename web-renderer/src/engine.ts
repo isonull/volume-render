@@ -2,6 +2,7 @@ import { Scene } from './scene'
 import { Viewport } from './viewport'
 import { MprRenderer, PreparedScene } from './mpr/mprRenderer'
 import type { SceneChangeSet } from './scene'
+import type { SceneTransaction } from './scene'
 import type { ScalarVolume } from './volume'
 import type { MprRenderState } from './mpr/mprState'
 
@@ -23,12 +24,12 @@ export class Engine {
   }
 
   loadVolume(volume: ScalarVolume): SceneChangeSet {
-    this.destroyScene()
-    const scene = new Scene(`scene-${Date.now()}`)
-    const changeSet = scene.transaction(tx => {
+    if (!this.scene) {
+      this.scene = new Scene(`scene-${Date.now()}`)
+    }
+    const changeSet = this.scene.transaction(tx => {
       tx.addVolume(volume)
     })
-    this.scene = scene
     this.applySceneChangeSet(changeSet)
     return changeSet
   }
@@ -56,6 +57,16 @@ export class Engine {
     this.requestRender(viewportId)
   }
 
+  applySceneTransaction<T>(fn: (tx: SceneTransaction) => T): SceneChangeSet<T> {
+    if (!this.scene) {
+      throw new Error('Cannot apply scene transaction before a scene is loaded.')
+    }
+
+    const changeSet = this.scene.transaction(fn)
+    this.applySceneChangeSet(changeSet)
+    return changeSet
+  }
+
   applySceneChangeSet(changeSet: SceneChangeSet): void {
     if (!this.scene || changeSet.sceneId !== this.scene.id) {
       throw new Error(`Cannot apply change set for inactive scene ${changeSet.sceneId}.`)
@@ -72,6 +83,14 @@ export class Engine {
         this.preparedScene.pendingInvalidations.push({
           type: 'volumeTextureDirty',
           volumeId: change.volumeId,
+          regions: change.regions,
+        })
+      } else if (change.type === 'segmentation.added' || change.type === 'segmentation.removed') {
+        this.preparedScene.pendingInvalidations.push({ type: 'preparedSceneStructureDirty' })
+      } else if (change.type === 'segmentation.changed') {
+        this.preparedScene.pendingInvalidations.push({
+          type: 'segmentationTextureDirty',
+          segmentationId: change.segmentationId,
           regions: change.regions,
         })
       }
@@ -114,6 +133,17 @@ export class Engine {
     this.renderStates.clear()
     this.pendingViewportIds.clear()
     this.scene = null
+    for (const viewport of this.viewports.values()) {
+      viewport.clear()
+    }
+  }
+
+  clearViewports(): void {
+    this.renderStates.clear()
+    this.pendingViewportIds.clear()
+    for (const viewport of this.viewports.values()) {
+      viewport.clear()
+    }
   }
 
   destroy(): void {

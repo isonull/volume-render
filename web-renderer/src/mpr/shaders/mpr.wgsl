@@ -7,6 +7,11 @@ struct MprUniforms {
   worldToIndex2: vec4<f32>,
   worldToIndex3: vec4<f32>,
   dims: vec4<u32>,
+  labelWorldToIndex0: vec4<f32>,
+  labelWorldToIndex1: vec4<f32>,
+  labelWorldToIndex2: vec4<f32>,
+  labelWorldToIndex3: vec4<f32>,
+  labelDims: vec4<u32>,
   canvasSize: vec4<f32>,
   window: vec4<f32>,
   options: vec4<u32>,
@@ -14,6 +19,8 @@ struct MprUniforms {
 
 @group(0) @binding(0) var<uniform> mpr: MprUniforms;
 @group(0) @binding(1) var volumeTex: texture_3d<f32>;
+@group(0) @binding(2) var labelmapTex: texture_3d<u32>;
+@group(0) @binding(3) var<storage, read> labelColors: array<vec4<f32>>;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -40,14 +47,28 @@ fn world_to_index(world: vec3<f32>) -> vec3<f32> {
   );
 }
 
-fn in_bounds(index: vec3<f32>) -> bool {
-  let dims = vec3<f32>(vec3<u32>(mpr.dims.xyz));
+fn world_to_label_index(world: vec3<f32>) -> vec3<f32> {
+  let p = vec4<f32>(world, 1.0);
+  return vec3<f32>(
+    dot(mpr.labelWorldToIndex0, p),
+    dot(mpr.labelWorldToIndex1, p),
+    dot(mpr.labelWorldToIndex2, p),
+  );
+}
+
+fn in_bounds(index: vec3<f32>, dimsU: vec3<u32>) -> bool {
+  let dims = vec3<f32>(dimsU);
   return !any(index < vec3<f32>(0.0)) && !any(index > dims - vec3<f32>(1.0));
 }
 
 fn load_voxel(index: vec3<i32>) -> f32 {
   let maxIndex = vec3<i32>(vec3<u32>(mpr.dims.xyz) - vec3<u32>(1u));
   return textureLoad(volumeTex, clamp(index, vec3<i32>(0), maxIndex), 0).r;
+}
+
+fn load_label(index: vec3<i32>) -> u32 {
+  let maxIndex = vec3<i32>(vec3<u32>(mpr.labelDims.xyz) - vec3<u32>(1u));
+  return textureLoad(labelmapTex, clamp(index, vec3<i32>(0), maxIndex), 0).r;
 }
 
 fn sample_nearest(index: vec3<f32>) -> f32 {
@@ -86,11 +107,24 @@ fn fs_main(@builtin(position) fragCoord: vec4<f32>) -> @location(0) vec4<f32> {
     - dy * mpr.window.z * mpr.up.xyz;
   let index = world_to_index(world);
 
-  if (!in_bounds(index)) {
+  if (!in_bounds(index, mpr.dims.xyz)) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
   let raw = select(sample_nearest(index), sample_linear(index), mpr.options.x == 1u);
   let gray = clamp((raw - mpr.window.x) / max(1e-6, mpr.window.y - mpr.window.x), 0.0, 1.0);
-  return vec4<f32>(gray, gray, gray, 1.0);
+  var color = vec4<f32>(gray, gray, gray, 1.0);
+
+  if (mpr.options.y == 1u) {
+    let labelIndex = world_to_label_index(world);
+    if (in_bounds(labelIndex, mpr.labelDims.xyz)) {
+      let label = load_label(vec3<i32>(round(labelIndex)));
+      if (label > 0u && label < arrayLength(&labelColors)) {
+        let overlay = labelColors[label];
+        color = vec4<f32>(mix(color.rgb, overlay.rgb, overlay.a), 1.0);
+      }
+    }
+  }
+
+  return color;
 }

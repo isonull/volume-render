@@ -1,4 +1,5 @@
-import type { Vec3 } from '../volume'
+import { vec3 } from 'wgpu-matrix'
+import type { Vec3, Vec3n } from 'wgpu-matrix'
 
 export interface Bounds3 {
   pMin: Vec3
@@ -6,7 +7,7 @@ export interface Bounds3 {
 }
 
 export interface DensityVolume {
-  dims: Vec3
+  dims: Vec3n
   density: Float32Array
 }
 
@@ -20,12 +21,12 @@ export interface GridMediumParams {
 
 export interface MajorantGrid {
   bounds: Bounds3
-  res: Vec3
+  res: Vec3n
   voxels: Float32Array
   globalMaxDensity: number
 }
 
 export const DEFAULT_VOLUME_BOUNDS: Bounds3 = {
-  pMin: [-0.5, -0.5, -0.5],
-  pMax: [0.5, 0.5, 0.5],
+  pMin: vec3.create(-0.5, -0.5, -0.5),
+  pMax: vec3.create(0.5, 0.5, 0.5),
 }

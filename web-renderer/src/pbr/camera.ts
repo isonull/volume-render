@@ -1,5 +1,5 @@
 import { mat4, vec3, type Mat4 } from 'wgpu-matrix'
-import type { Vec3 } from '../volume'
+import type { Vec3 } from 'wgpu-matrix'
 
 export type Vec2 = [number, number]
 
@@ -47,7 +47,7 @@ export interface CameraUniformData {
   viewportAndTime: [number, number, number, number]
 }
 
-const DEFAULT_UP: Vec3 = [0, 1, 0]
+const DEFAULT_UP = vec3.create(0, 1, 0)
 
 export class CameraTransform {
   readonly worldFromCamera: Mat4
@@ -63,11 +63,11 @@ export class CameraTransform {
   }
 
   renderFromCameraPoint(point: Vec3): Vec3 {
-    return toVec3(vec3.transformMat4(point, this.worldFromCamera))
+    return vec3.transformMat4(point, this.worldFromCamera)
   }
 
   renderFromCameraVector(vector: Vec3): Vec3 {
-    return toVec3(vec3.transformMat4Upper3x3(vector, this.worldFromCamera))
+    return vec3.transformMat4Upper3x3(vector, this.worldFromCamera)
   }
 }
 
@@ -117,7 +117,7 @@ export class PerspectiveCamera {
     const pCamera = vec3.transformMat4([sample.pFilm[0], sample.pFilm[1], 0], this.cameraFromRaster)
     return {
       origin: this.position,
-      direction: toVec3(vec3.normalize(this.transform.renderFromCameraVector(toVec3(pCamera)))),
+      direction: vec3.normalize(this.transform.renderFromCameraVector(pCamera)),
     }
   }
 
@@ -194,8 +194,8 @@ export class OrthographicCamera {
   generateRay(sample: CameraSample): Ray {
     const pCamera = vec3.transformMat4([sample.pFilm[0], sample.pFilm[1], 0], this.cameraFromRaster)
     return {
-      origin: this.transform.renderFromCameraPoint(toVec3(pCamera)),
-      direction: toVec3(vec3.normalize(this.transform.renderFromCameraVector([0, 0, -1]))),
+      origin: this.transform.renderFromCameraPoint(pCamera),
+      direction: vec3.normalize(this.transform.renderFromCameraVector(vec3.create(0, 0, -1))),
     }
   }
 
@@ -261,6 +261,3 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180
 }
 
-function toVec3(value: ArrayLike<number>): Vec3 {
-  return [value[0], value[1], value[2]]
-}
