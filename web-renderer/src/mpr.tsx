@@ -1,13 +1,39 @@
 import './style.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { mat4, vec3 } from 'wgpu-matrix'
-import { Engine } from './engine'
-import { cloneMprState, createInitialMprState, valueRange } from './mpr/mprState'
+import { CommandDispatcher } from './commands/commandDispatcher'
+import {
+  CENTER_VOLUME_COMMAND,
+  SET_MPR_RENDER_STATE_COMMAND,
+  SET_OVERLAY_SEGMENTATION_COMMAND,
+  createMprCommands,
+} from './commands/mprCommands'
+import {
+  CLOSE_SEGMENTATION_COMMAND,
+  CLOSE_VOLUME_COMMAND,
+  OPEN_SEGMENTATION_COMMAND,
+  OPEN_VOLUME_COMMAND,
+  createSceneCommands,
+} from './commands/sceneCommands'
+import { createSegmentationCommands } from './commands/segmentationCommands'
+import { MprRenderer } from './mpr/mprRenderer'
+import { createInitialMprState, valueRange } from './mpr/mprState'
+import { canvasToWorld, isVoxelInBounds, worldToIndex } from './mpr/mprMath'
+import { RenderService } from './services/renderService'
+import { SceneService } from './services/sceneService'
+import { SegmentationService } from './services/segmentationService'
+import { ViewportService } from './services/viewportService'
+import { InputRouter } from './tools/inputRouter'
+import { PanTool, ProbeTool, SegmentationBrushTool, StackScrollTool, WindowLevelTool, ZoomTool } from './tools/mprTools'
+import { ToolController } from './tools/toolController'
+import { ToolGroupService } from './tools/toolGroupService'
+import { ToolRegistry } from './tools/toolRegistry'
+import type { Scene } from './scene'
 import type { MprOrientation, MprRenderState } from './mpr/mprState'
-import type { Mat4, Vec2n, Vec3, Vec3n } from 'wgpu-matrix'
+import type { Vec2n, Vec3, Vec3n } from 'wgpu-matrix'
 import type { ScalarVolume } from './volume'
 import type { MouseEvent } from 'react'
+import type { LabelmapSegmentationData } from './segmentation'
 
 const VIEWPORTS: { id: MprOrientation; label: string }[] = [
   { id: 'axial', label: 'Axial' },
@@ -15,26 +41,10 @@ const VIEWPORTS: { id: MprOrientation; label: string }[] = [
   { id: 'sagittal', label: 'Sagittal' },
 ]
 
-type DragState = {
-  viewportId: MprOrientation
-  previous: Vec2n
-  mode: 'pan' | 'window'
-}
+const NO_MODIFIERS = { shift: false, ctrl: false, alt: false, meta: false }
+const MPR_TOOL_GROUP_ID = 'mpr'
 
-type VolumeInfo = {
-  volume: string
-  source: string
-  affine?: string
-  intensity?: string
-  centerIndex?: string
-}
-
-type SegmentationInfo = {
-  source: string
-  labels: string
-  dtype: string
-  affine: string
-}
+type InteractionMode = 'navigate' | 'brush' | 'erase'
 
 type SceneBrowserItem =
   | { kind: 'volume'; id: string; label: string; shape: string; source?: string; segmentations: SceneBrowserItem[] }
@@ -46,46 +56,55 @@ type ContextMenuState = {
   item: { kind: 'volume' | 'segmentation'; id: string }
 }
 
-type CursorInfo = {
-  viewport: string
-  voxel: string
+type ProbeInfo = {
+  viewportId: MprOrientation
+  voxel: Vec3n
   world: string
+  intensity: string
   inBounds: boolean
+}
+
+type BrushPreviewInfo = {
+  viewportId: MprOrientation
+  point: Vec2n
+  radiusPx: number
+  mode: 'paint' | 'erase'
+  valid: boolean
 }
 
 function MprApp() {
   const canvasRefs = useRef(new Map<MprOrientation, HTMLCanvasElement>())
-  const engineRef = useRef<Engine | null>(null)
+  const sceneServiceRef = useRef<SceneService | null>(null)
+  const viewportServiceRef = useRef<ViewportService | null>(null)
+  const renderServiceRef = useRef<RenderService | null>(null)
+  const segmentationServiceRef = useRef<SegmentationService | null>(null)
+  const toolGroupsRef = useRef<ToolGroupService | null>(null)
+  const commandDispatcherRef = useRef<CommandDispatcher | null>(null)
+  const inputRouterRef = useRef<InputRouter | null>(null)
   const activeVolumeRef = useRef<ScalarVolume | null>(null)
   const activeSegmentationIdRef = useRef<string | null>(null)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const segmentationInputRef = useRef<HTMLInputElement | null>(null)
   const segmentationTargetVolumeIdRef = useRef<string | null>(null)
-  const dragRef = useRef<DragState | null>(null)
+  const keyboardViewportIdRef = useRef<MprOrientation | null>(null)
   const windowMinRef = useRef('0')
   const windowMaxRef = useRef('0')
 
   const [status, setStatus] = useState('Initializing WebGPU...')
-  const [controlsEnabled, setControlsEnabled] = useState(false)
-  const [windowMin, setWindowMinState] = useState('0')
-  const [windowMax, setWindowMaxState] = useState('0')
   const [sceneBrowserVersion, setSceneBrowserVersion] = useState(0)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
-  const [volumeInfo, setVolumeInfo] = useState<VolumeInfo>({
-    volume: 'No NIfTI loaded',
-    source: 'Waiting for .nii or .nii.gz',
-  })
-  const [segmentationInfo, setSegmentationInfo] = useState<SegmentationInfo | null>(null)
-  const [cursorInfo, setCursorInfo] = useState<CursorInfo | null>(null)
+  const [probeInfo, setProbeInfo] = useState<ProbeInfo | null>(null)
+  const [brushPreview, setBrushPreview] = useState<BrushPreviewInfo | null>(null)
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('navigate')
+  const [brushRadiusMm, setBrushRadiusMmState] = useState(3)
+  const [activeSegmentLabel, setActiveSegmentLabelState] = useState(1)
 
   const setWindowMin = useCallback((value: string) => {
     windowMinRef.current = value
-    setWindowMinState(value)
   }, [])
 
   const setWindowMax = useCallback((value: string) => {
     windowMaxRef.current = value
-    setWindowMaxState(value)
   }, [])
 
   const setCanvasRef = useCallback((id: MprOrientation) => (canvas: HTMLCanvasElement | null) => {
@@ -97,16 +116,47 @@ function MprApp() {
   }, [])
 
   const currentState = useCallback((viewportId: MprOrientation): MprRenderState | null => {
-    return engineRef.current?.renderStates.get(viewportId) ?? null
+    return viewportServiceRef.current?.renderStates.get(viewportId) ?? null
+  }, [])
+
+  const setToolInteractionMode = useCallback((mode: InteractionMode) => {
+    const segmentationService = segmentationServiceRef.current
+    const toolGroups = toolGroupsRef.current
+    if (mode !== 'navigate' && !segmentationService?.getActiveSegmentationId()) {
+      setStatus('Open a segmentation before using brush tools.')
+      return
+    }
+    setInteractionMode(mode)
+    setBrushPreview(null)
+    if (mode === 'navigate') {
+      toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'mpr.pan', 'active')
+      toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'seg.brush', 'disabled')
+      return
+    }
+    segmentationService?.setBrushMode(mode === 'erase' ? 'erase' : 'paint')
+    toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'mpr.pan', 'disabled')
+    toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'seg.brush', 'active')
+  }, [])
+
+  const setBrushRadiusMm = useCallback((radiusMm: number) => {
+    const next = Math.max(0.25, Number(radiusMm.toFixed(2)))
+    segmentationServiceRef.current?.setBrushRadiusMm(next)
+    setBrushRadiusMmState(next)
+  }, [])
+
+  const setActiveSegmentLabel = useCallback((label: number) => {
+    segmentationServiceRef.current?.setActiveSegmentLabel(label)
+    setActiveSegmentLabelState(label)
   }, [])
 
   const resetView = useCallback((viewportId: MprOrientation) => {
-    const engine = engineRef.current
+    const viewportService = viewportServiceRef.current
+    const commands = commandDispatcherRef.current
     const activeVolume = activeVolumeRef.current
-    if (!engine || !activeVolume) {
+    if (!viewportService || !commands || !activeVolume) {
       return
     }
-    const viewport = engine.viewports.get(viewportId)
+    const viewport = viewportService.viewports.get(viewportId)
     if (!viewport) {
       return
     }
@@ -125,13 +175,14 @@ function MprApp() {
         visible: true,
       }
     }
-    engine.setRenderState(viewportId, state)
+    commands.execute(SET_MPR_RENDER_STATE_COMMAND, { viewportId, state })
   }, [])
 
   const centerVolume = useCallback((volumeId: string) => {
-    const engine = engineRef.current
-    const volume = engine?.scene?.volumes.get(volumeId)
-    if (!engine || !volume) {
+    const sceneService = sceneServiceRef.current
+    const commands = commandDispatcherRef.current
+    const volume = sceneService?.scene?.volumes.get(volumeId)
+    if (!sceneService || !commands || !volume) {
       return
     }
     activeVolumeRef.current = volume
@@ -139,39 +190,26 @@ function MprApp() {
     const range = max - min
     setWindowMin(formatInput(min + range * 0.05))
     setWindowMax(formatInput(max))
-    setVolumeInfo(createVolumeInfo(volume, volume.source?.uri ?? volume.id, volume.indexToWorld))
-    setControlsEnabled(true)
-    for (const viewport of VIEWPORTS) {
-      const canvas = canvasRefs.current.get(viewport.id)
-      const viewportView = engine.viewports.get(viewport.id)
-      if (!canvas || !viewportView) {
-        continue
-      }
-      viewportView.resizeFromClient()
-      const canvasPixels = Math.min(viewportView.width, viewportView.height)
-      const state = createInitialMprState(volume, viewport.id, canvasPixels)
-      const activeSegmentationId = activeSegmentationIdRef.current
-      if (activeSegmentationId && engine.scene?.segmentations.get(activeSegmentationId)?.sourceVolumeId === volume.id) {
-        state.overlay = {
-          segmentationId: activeSegmentationId,
-          visible: true,
-        }
-      }
-      engine.setRenderState(viewport.id, state)
-    }
+    commands.execute(CENTER_VOLUME_COMMAND, {
+      volume,
+      viewportIds: VIEWPORTS.map(viewport => viewport.id),
+      activeSegmentationId: activeSegmentationIdRef.current,
+      windowMin: min + range * 0.05,
+      windowMax: max,
+    })
     setStatus(`Centered ${volume.source?.uri ?? volume.id}.`)
   }, [setWindowMax, setWindowMin])
 
   const centerSceneItem = useCallback((item: ContextMenuState['item']) => {
-    const engine = engineRef.current
-    if (!engine?.scene) {
+    const scene = sceneServiceRef.current?.scene
+    if (!scene) {
       return
     }
     if (item.kind === 'volume') {
       centerVolume(item.id)
       return
     }
-    const segmentation = engine.scene.segmentations.get(item.id)
+    const segmentation = scene.segmentations.get(item.id)
     if (segmentation) {
       activeSegmentationIdRef.current = segmentation.id
       centerVolume(segmentation.sourceVolumeId)
@@ -179,8 +217,7 @@ function MprApp() {
   }, [centerVolume])
 
   const openSegmentationForVolume = useCallback((volumeId: string) => {
-    const engine = engineRef.current
-    if (!engine?.scene?.volumes.has(volumeId)) {
+    if (!sceneServiceRef.current?.scene?.volumes.has(volumeId)) {
       return
     }
     segmentationTargetVolumeIdRef.current = volumeId
@@ -192,201 +229,143 @@ function MprApp() {
   }, [])
 
   const closeSceneItem = useCallback((item: ContextMenuState['item']) => {
-    const engine = engineRef.current
-    if (!engine?.scene) {
+    const commands = commandDispatcherRef.current
+    if (!sceneServiceRef.current?.scene || !commands) {
       return
     }
     if (item.kind === 'volume') {
-      const volume = engine.scene.volumes.get(item.id)
-      if (!volume) {
-        return
-      }
-      const removedSegmentationIds = [...engine.scene.segmentations.values()]
-        .filter(segmentation => segmentation.sourceVolumeId === item.id)
-        .map(segmentation => segmentation.id)
-      engine.applySceneTransaction(tx => {
-        for (const segmentationId of removedSegmentationIds) {
-          tx.removeSegmentation(segmentationId)
-        }
-        tx.removeVolume(item.id)
-      })
-      if (activeSegmentationIdRef.current && removedSegmentationIds.includes(activeSegmentationIdRef.current)) {
+      const result = commands.execute<{ volumeId: string }, {
+        volume: ScalarVolume
+        removedSegmentationIds: string[]
+        nextVolume: ScalarVolume | null
+        sceneDestroyed: boolean
+      }>(CLOSE_VOLUME_COMMAND, { volumeId: item.id })
+      if (activeSegmentationIdRef.current && result.removedSegmentationIds.includes(activeSegmentationIdRef.current)) {
         activeSegmentationIdRef.current = null
-        setSegmentationInfo(null)
+        setToolInteractionMode('navigate')
       }
-      const nextVolume = [...engine.scene.volumes.values()][0]
-      if (nextVolume) {
-        centerVolume(nextVolume.id)
+      if (result.nextVolume) {
+        centerVolume(result.nextVolume.id)
       } else {
         activeVolumeRef.current = null
         activeSegmentationIdRef.current = null
-        setControlsEnabled(false)
-        setCursorInfo(null)
-        setSegmentationInfo(null)
-        setVolumeInfo({
-          volume: 'No NIfTI loaded',
-          source: 'Waiting for .nii or .nii.gz',
-        })
-        engine.destroyScene()
+        setProbeInfo(null)
+        setBrushPreview(null)
+        setToolInteractionMode('navigate')
       }
-      setStatus(`Volume ${volume.source?.uri ?? volume.id} closed.`)
+      setStatus(`Volume ${result.volume.source?.uri ?? result.volume.id} closed.`)
     } else {
-      engine.applySceneTransaction(tx => tx.removeSegmentation(item.id))
+      commands.execute(CLOSE_SEGMENTATION_COMMAND, { segmentationId: item.id })
       if (activeSegmentationIdRef.current === item.id) {
         activeSegmentationIdRef.current = null
-        setSegmentationInfo(null)
-        for (const [viewportId, state] of engine.renderStates) {
-          const next = cloneMprState(state)
-          next.overlay = undefined
-          engine.setRenderState(viewportId, next)
-        }
+        setToolInteractionMode('navigate')
+        commands.execute(SET_OVERLAY_SEGMENTATION_COMMAND, { visible: false })
       }
       setStatus('Segmentation closed.')
     }
     setSceneBrowserVersion(version => version + 1)
-  }, [centerVolume])
+  }, [centerVolume, setToolInteractionMode])
 
-  const resetViews = useCallback(() => {
-    if (!engineRef.current || !activeVolumeRef.current) {
-      return
+  const getWorldPoint = useCallback((viewportId: string, clientPoint: Vec2n): Vec3 | null => {
+    const typedViewportId = viewportId as MprOrientation
+    const viewportService = viewportServiceRef.current
+    const state = currentState(typedViewportId)
+    const viewport = viewportService?.viewports.get(typedViewportId)
+    if (!viewportService || !state || !viewport) {
+      return null
     }
-    for (const viewport of VIEWPORTS) {
-      resetView(viewport.id)
-    }
-  }, [resetView])
-
-  const applyWindowToAllViews = useCallback(() => {
-    const engine = engineRef.current
-    if (!engine) {
-      return
-    }
-    const min = Number.parseFloat(windowMinRef.current)
-    const max = Number.parseFloat(windowMaxRef.current)
-    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-      setStatus('Window max must be greater than window min.')
-      return
-    }
-    for (const [viewportId, state] of engine.renderStates) {
-      const next = cloneMprState(state)
-      next.image.windowMin = min
-      next.image.windowMax = max
-      engine.setRenderState(viewportId, next)
-    }
-  }, [])
-
-  const updateCursorInfo = useCallback((viewportId: MprOrientation, clientPoint: Vec2n) => {
-    const engine = engineRef.current
-    const activeVolume = activeVolumeRef.current
-    const state = currentState(viewportId)
-    const viewport = engine?.viewports.get(viewportId)
-    if (!engine || !activeVolume || !state || !viewport) {
-      setCursorInfo(null)
-      return
-    }
-
     viewport.resizeFromClient()
     const canvasPoint = viewport.clientToCanvas(clientPoint)
-    const world = canvasToWorld(canvasPoint, viewport.width, viewport.height, state)
+    return canvasToWorld(canvasPoint, viewport.width, viewport.height, state)
+  }, [currentState])
+
+  const getBrushPreviewRadiusPx = useCallback((viewportId: string, radiusMm: number): number | null => {
+    const state = currentState(viewportId as MprOrientation)
+    const viewport = viewportServiceRef.current?.viewports.get(viewportId)
+    if (!state || !viewport || !Number.isFinite(radiusMm) || radiusMm <= 0) {
+      return null
+    }
+    return radiusMm / (state.plane.pixelSize * viewport.pixelRatio)
+  }, [currentState])
+
+  const updateBrushPreview = useCallback((preview: {
+    viewportId: string
+    clientPoint: Vec2n
+    radiusPx: number
+    mode: 'paint' | 'erase'
+    valid: boolean
+  } | null) => {
+    if (!preview) {
+      setBrushPreview(null)
+      return
+    }
+    const viewportId = preview.viewportId as MprOrientation
+    const viewport = viewportServiceRef.current?.viewports.get(viewportId)
+    if (!viewport) {
+      setBrushPreview(null)
+      return
+    }
+    const rect = viewport.canvas.getBoundingClientRect()
+    setBrushPreview({
+      viewportId,
+      point: [
+        preview.clientPoint[0] - rect.left,
+        preview.clientPoint[1] - rect.top,
+      ],
+      radiusPx: preview.radiusPx,
+      mode: preview.mode,
+      valid: preview.valid,
+    })
+  }, [])
+
+  const updateProbeInfo = useCallback((viewportId: string, clientPoint: Vec2n) => {
+    const typedViewportId = viewportId as MprOrientation
+    const viewportService = viewportServiceRef.current
+    const activeVolume = activeVolumeRef.current
+    const world = getWorldPoint(viewportId, clientPoint)
+    if (!viewportService || !activeVolume || !world) {
+      setProbeInfo(null)
+      return
+    }
+
     const index = worldToIndex(world, activeVolume)
     const voxel: Vec3n = [
       Math.round(index[0]),
       Math.round(index[1]),
       Math.round(index[2]),
     ]
-    setCursorInfo({
-      viewport: VIEWPORTS.find(item => item.id === viewportId)?.label ?? viewportId,
-      voxel: voxel.map(value => String(value)).join(', '),
+    const inBounds = isVoxelInBounds(voxel, activeVolume)
+    setProbeInfo({
+      viewportId: typedViewportId,
+      voxel,
       world: Array.from(world, formatCoordinate).join(', '),
-      inBounds: isVoxelInBounds(voxel, activeVolume),
+      intensity: inBounds ? formatIntensity(readVolumeVoxel(activeVolume, voxel)) : 'n/a',
+      inBounds,
     })
-  }, [currentState])
-
-  const pan = useCallback((viewportId: MprOrientation, delta: Vec2n) => {
-    const state = currentState(viewportId)
-    const engine = engineRef.current
-    if (!state || !engine) {
-      return
-    }
-    const next = cloneMprState(state)
-    next.plane.origin = vec3.addScaled(
-      next.plane.origin,
-      next.plane.right,
-      -delta[0] * next.plane.pixelSize,
-    )
-    next.plane.origin = vec3.addScaled(
-      next.plane.origin,
-      next.plane.up,
-      delta[1] * next.plane.pixelSize,
-    )
-    engine.setRenderState(viewportId, next)
-  }, [currentState])
-
-  const scroll = useCallback((viewportId: MprOrientation, deltaY: number) => {
-    const state = currentState(viewportId)
-    const engine = engineRef.current
-    const activeVolume = activeVolumeRef.current
-    const direction = Math.sign(deltaY)
-    if (!state || !engine || !activeVolume || direction === 0) {
-      return
-    }
-    const next = cloneMprState(state)
-    const normal = vec3.normalize(vec3.cross(next.plane.right, next.plane.up))
-    next.plane.origin = vec3.addScaled(next.plane.origin, normal, direction * sliceStepSize(normal, activeVolume))
-    engine.setRenderState(viewportId, next)
-  }, [currentState])
-
-  const zoom = useCallback((viewportId: MprOrientation, deltaY: number) => {
-    const state = currentState(viewportId)
-    const engine = engineRef.current
-    if (!state || !engine) {
-      return
-    }
-    const next = cloneMprState(state)
-    next.plane.pixelSize = Math.max(1e-6, next.plane.pixelSize * Math.exp(deltaY * 0.001))
-    engine.setRenderState(viewportId, next)
-  }, [currentState])
-
-  const updateWindow = useCallback((viewportId: MprOrientation, delta: Vec2n) => {
-    const state = currentState(viewportId)
-    const engine = engineRef.current
-    if (!state || !engine) {
-      return
-    }
-    const next = cloneMprState(state)
-    const width = Math.max(1e-6, next.image.windowMax - next.image.windowMin)
-    const center = (next.image.windowMax + next.image.windowMin) * 0.5
-    const nextCenter = center + delta[0] * width * 0.005
-    const nextWidth = Math.max(1e-6, width * Math.exp(delta[1] * 0.005))
-    next.image.windowMin = nextCenter - nextWidth * 0.5
-    next.image.windowMax = nextCenter + nextWidth * 0.5
-    engine.setRenderState(viewportId, next)
-    setWindowMin(formatInput(next.image.windowMin))
-    setWindowMax(formatInput(next.image.windowMax))
-  }, [currentState, setWindowMax, setWindowMin])
+  }, [getWorldPoint])
 
   const loadImageFile = useCallback(async (file: File | undefined) => {
-    const engine = engineRef.current
-    if (!file || !engine) {
+    const commands = commandDispatcherRef.current
+    if (!file || !commands) {
       return
     }
 
     try {
       setStatus(`Loading ${file.name}...`)
-      const { indexToWorldFromNiftiFile, loadNiftiFile, scalarVolumeFromNiftiFile } = await import('./io/nifti')
+      const { loadNiftiFile, scalarVolumeFromNiftiFile } = await import('./io/nifti')
       const niftiFile = await loadNiftiFile(file)
       const volume = scalarVolumeFromNiftiFile(niftiFile, file.name)
       activeVolumeRef.current = volume
       activeSegmentationIdRef.current = null
-      setCursorInfo(null)
-      setSegmentationInfo(null)
-      engine.loadVolume(volume)
+      setProbeInfo(null)
+      setBrushPreview(null)
+      setToolInteractionMode('navigate')
+      commands.execute(OPEN_VOLUME_COMMAND, { volume })
       setSceneBrowserVersion(version => version + 1)
       const [min, max] = valueRange(volume)
       const range = max - min
       setWindowMin(formatInput(min + range * 0.05))
       setWindowMax(formatInput(max))
-      setVolumeInfo(createVolumeInfo(volume, file.name, indexToWorldFromNiftiFile(niftiFile)))
-      setControlsEnabled(true)
       for (const viewport of VIEWPORTS) {
         resetView(viewport.id)
       }
@@ -394,15 +373,16 @@ function MprApp() {
     } catch (error) {
       setStatus(errorMessage(error))
     }
-  }, [resetView, setWindowMax, setWindowMin])
+  }, [resetView, setToolInteractionMode, setWindowMax, setWindowMin])
 
   const loadSegmentationFile = useCallback(async (file: File | undefined, sourceVolumeId?: string | null) => {
-    const engine = engineRef.current
-    if (!file || !engine) {
+    const sceneService = sceneServiceRef.current
+    const commands = commandDispatcherRef.current
+    if (!file || !sceneService || !commands) {
       return
     }
     const activeVolume = sourceVolumeId
-      ? engine.scene?.volumes.get(sourceVolumeId) ?? null
+      ? sceneService.scene?.volumes.get(sourceVolumeId) ?? null
       : activeVolumeRef.current
     if (!activeVolume) {
       setStatus('Choose a source volume before loading a segmentation.')
@@ -411,38 +391,18 @@ function MprApp() {
 
     try {
       setStatus(`Loading segmentation ${file.name}...`)
-      const { indexToWorldFromNiftiFile, labelmapSegmentationFromNiftiFile, loadNiftiFile } = await import('./io/nifti')
+      const { labelmapSegmentationFromNiftiFile, loadNiftiFile } = await import('./io/nifti')
       const niftiFile = await loadNiftiFile(file)
-      const rawIndexToWorld = indexToWorldFromNiftiFile(niftiFile)
       const segmentation = labelmapSegmentationFromNiftiFile(niftiFile, activeVolume, file.name)
-      engine.applySceneTransaction(tx => {
-        for (const [segmentationId, existing] of engine.scene!.segmentations) {
-          if (existing.sourceVolumeId !== activeVolume.id) {
-            continue
-          }
-          tx.removeSegmentation(segmentationId)
-        }
-        tx.addSegmentation(segmentation)
-      })
+      commands.execute<{ segmentation: LabelmapSegmentationData }, void>(OPEN_SEGMENTATION_COMMAND, { segmentation })
       setSceneBrowserVersion(version => version + 1)
       activeSegmentationIdRef.current = segmentation.id
       activeVolumeRef.current = activeVolume
-      for (const [viewportId, state] of engine.renderStates) {
-        if (state.image.volumeId !== activeVolume.id) {
-          continue
-        }
-        const next = cloneMprState(state)
-        next.overlay = {
-          segmentationId: segmentation.id,
-          visible: true,
-        }
-        engine.setRenderState(viewportId, next)
-      }
-      setSegmentationInfo({
-        source: file.name,
-        labels: segmentation.segments.size === 0 ? 'background only' : `${segmentation.segments.size} non-zero label${segmentation.segments.size === 1 ? '' : 's'}`,
-        dtype: segmentation.data.constructor.name,
-        affine: formatMat4Rows(rawIndexToWorld),
+      setActiveSegmentLabel(firstEditableLabel(segmentation))
+      commands.execute(SET_OVERLAY_SEGMENTATION_COMMAND, {
+        segmentationId: segmentation.id,
+        sourceVolumeId: activeVolume.id,
+        visible: true,
       })
       setStatus(`Segmentation ${file.name} loaded for ${activeVolume.source?.uri ?? activeVolume.id}.`)
     } catch (error) {
@@ -452,23 +412,75 @@ function MprApp() {
 
   useEffect(() => {
     let cancelled = false
-    let engine: Engine | null = null
+    let renderer: MprRenderer | null = null
+    let sceneService: SceneService | null = null
+    let viewportService: ViewportService | null = null
+    let renderService: RenderService | null = null
+    let segmentationService: SegmentationService | null = null
 
     async function boot(): Promise<void> {
       try {
-        engine = await Engine.create()
+        renderer = await MprRenderer.create()
         if (cancelled) {
-          engine.destroy()
+          renderer.destroy()
           return
         }
+        sceneService = new SceneService()
+        viewportService = new ViewportService(renderer.device, renderer.format)
+        renderService = new RenderService(renderer, sceneService, viewportService)
+        segmentationService = new SegmentationService(sceneService)
+        sceneServiceRef.current = sceneService
+        viewportServiceRef.current = viewportService
+        renderServiceRef.current = renderService
+        segmentationServiceRef.current = segmentationService
+        segmentationService.setBrushRadiusMm(3)
+        const commandDispatcher = new CommandDispatcher({
+          sceneService,
+          viewportService,
+          renderService,
+          segmentationService,
+        })
+        for (const command of [...createSceneCommands(), ...createMprCommands(), ...createSegmentationCommands()]) {
+          commandDispatcher.register(command)
+        }
+        commandDispatcherRef.current = commandDispatcher
+        const toolRegistry = createToolRegistry()
+        const toolGroups = createDefaultToolGroups(toolRegistry)
+        toolGroupsRef.current = toolGroups
+        inputRouterRef.current = new InputRouter(new ToolController({
+          commands: commandDispatcher,
+          getActiveVolume: () => activeVolumeRef.current,
+          getBrushState: () => {
+            const service = segmentationServiceRef.current
+            const segmentationId = service?.getActiveSegmentationId()
+            if (!service || !segmentationId) {
+              return null
+            }
+            return {
+              segmentationId,
+              label: service.getActiveSegmentLabel(),
+              mode: service.getBrushMode(),
+              radiusMm: service.getBrushRadiusMm(),
+            }
+          },
+          getWorldPoint,
+          getBrushPreviewRadiusPx,
+          onBrushPreviewChanged: updateBrushPreview,
+          onCursorMove: updateProbeInfo,
+          onCursorLeave: () => setProbeInfo(null),
+          onWindowLevelChanged: state => {
+            setWindowMin(formatInput(state.image.windowMin))
+            setWindowMax(formatInput(state.image.windowMax))
+          },
+        }, toolGroups))
         for (const viewport of VIEWPORTS) {
           const canvas = canvasRefs.current.get(viewport.id)
           if (!canvas) {
             throw new Error(`Missing ${viewport.label} canvas.`)
           }
-          engine.createViewport(canvas, viewport.id)
+          viewportService.createViewport(canvas, viewport.id)
+          toolGroups.addViewport('mpr', viewport.id)
         }
-        engineRef.current = engine
         setStatus('WebGPU ready. Load a NIfTI scalar volume.')
       } catch (error) {
         setStatus(errorMessage(error))
@@ -479,24 +491,59 @@ function MprApp() {
 
     return () => {
       cancelled = true
-      engineRef.current = null
-      engine?.destroy()
+      renderServiceRef.current = null
+      viewportServiceRef.current = null
+      sceneServiceRef.current = null
+      segmentationServiceRef.current = null
+      toolGroupsRef.current = null
+      commandDispatcherRef.current = null
+      inputRouterRef.current = null
+      renderService?.destroy()
+      viewportService?.destroy()
+      sceneService?.destroyScene()
+      renderer?.destroy()
     }
-  }, [])
+  }, [getBrushPreviewRadiusPx, getWorldPoint, setWindowMax, setWindowMin, updateBrushPreview, updateProbeInfo])
 
   useEffect(() => {
     function handleResize(): void {
-      const engine = engineRef.current
-      if (!engine) {
+      const viewportService = viewportServiceRef.current
+      const renderService = renderServiceRef.current
+      if (!viewportService || !renderService) {
         return
       }
-      for (const viewportId of engine.renderStates.keys()) {
-        engine.requestRender(viewportId)
+      for (const viewportId of viewportService.renderStates.keys()) {
+        renderService.requestRender(viewportId)
       }
     }
 
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      const viewportId = keyboardViewportIdRef.current
+      if (!viewportId || shouldIgnoreKeyboardEvent(event)) {
+        return
+      }
+      inputRouterRef.current?.handleKeyDown(event, viewportId)
+    }
+
+    function handleKeyUp(event: KeyboardEvent): void {
+      const viewportId = keyboardViewportIdRef.current
+      if (!viewportId || shouldIgnoreKeyboardEvent(event)) {
+        return
+      }
+      inputRouterRef.current?.handleKeyUp(event, viewportId)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
   }, [])
 
   useEffect(() => {
@@ -516,7 +563,12 @@ function MprApp() {
     }
   }, [contextMenu])
 
-  const sceneItems = createSceneBrowserItems(engineRef.current?.scene ?? null, sceneBrowserVersion)
+  const scene = sceneServiceRef.current?.scene ?? null
+  const activeSegmentation = activeSegmentationIdRef.current
+    ? scene?.segmentations.get(activeSegmentationIdRef.current) ?? null
+    : null
+  const editableLabels = activeSegmentation ? segmentLabelOptions(activeSegmentation, activeSegmentLabel) : []
+  const sceneItems = createSceneBrowserItems(scene, sceneBrowserVersion)
 
   return (
     <main className="mpr-shell">
@@ -528,56 +580,42 @@ function MprApp() {
               aria-label={`${viewport.label} MPR viewport`}
               onContextMenu={event => event.preventDefault()}
               onDoubleClick={() => resetView(viewport.id)}
-              onPointerCancel={() => {
-                dragRef.current = null
+              onPointerCancel={event => {
+                keyboardViewportIdRef.current = viewport.id
+                inputRouterRef.current?.handlePointerCancel(event.nativeEvent, viewport.id)
               }}
               onPointerDown={event => {
                 if (!activeVolumeRef.current) {
                   return
                 }
+                keyboardViewportIdRef.current = viewport.id
                 event.currentTarget.setPointerCapture(event.pointerId)
-                dragRef.current = {
-                  viewportId: viewport.id,
-                  previous: [event.clientX, event.clientY],
-                  mode: event.shiftKey || event.button === 2 ? 'window' : 'pan',
-                }
+                inputRouterRef.current?.handlePointerDown(event.nativeEvent, viewport.id)
               }}
               onPointerMove={event => {
-                const drag = dragRef.current
-                if (!drag || drag.viewportId !== viewport.id) {
-                  updateCursorInfo(viewport.id, [event.clientX, event.clientY])
-                  return
-                }
-                const current: Vec2n = [event.clientX, event.clientY]
-                const delta: Vec2n = [current[0] - drag.previous[0], current[1] - drag.previous[1]]
-                drag.previous = current
-                if (drag.mode === 'window') {
-                  updateWindow(viewport.id, delta)
-                } else {
-                  pan(viewport.id, delta)
-                }
-                updateCursorInfo(viewport.id, current)
+                keyboardViewportIdRef.current = viewport.id
+                inputRouterRef.current?.handlePointerMove(event.nativeEvent, viewport.id)
               }}
-              onPointerUp={() => {
-                dragRef.current = null
+              onPointerUp={event => {
+                keyboardViewportIdRef.current = viewport.id
+                inputRouterRef.current?.handlePointerUp(event.nativeEvent, viewport.id)
               }}
               onPointerLeave={() => {
-                setCursorInfo(null)
+                inputRouterRef.current?.clearHover()
+                setBrushPreview(null)
               }}
               onWheel={event => {
                 if (!activeVolumeRef.current) {
                   return
                 }
+                keyboardViewportIdRef.current = viewport.id
                 event.preventDefault()
-                if (event.ctrlKey) {
-                  zoom(viewport.id, event.deltaY)
-                } else {
-                  scroll(viewport.id, event.deltaY)
-                }
-                updateCursorInfo(viewport.id, [event.clientX, event.clientY])
+                inputRouterRef.current?.handleWheel(event.nativeEvent, viewport.id)
               }}
             />
             <div className="viewport-label">{viewport.label}</div>
+            {brushPreview?.viewportId === viewport.id ? <BrushPreviewOverlay brushPreview={brushPreview} /> : null}
+            {probeInfo?.viewportId === viewport.id ? <ProbeOverlay probeInfo={probeInfo} /> : null}
           </section>
         ))}
         <section className="mpr-empty" aria-label="Empty viewport slot" />
@@ -620,36 +658,53 @@ function MprApp() {
             }}
           />
         </div>
-        <div className="control-grid">
-          <label>
-            Window min
-            <input
-              type="number"
-              step="1"
-              disabled={!controlsEnabled}
-              value={windowMin}
-              onChange={event => setWindowMin(event.currentTarget.value)}
-            />
-          </label>
-          <label>
-            Window max
-            <input
-              type="number"
-              step="1"
-              disabled={!controlsEnabled}
-              value={windowMax}
-              onChange={event => setWindowMax(event.currentTarget.value)}
-            />
-          </label>
-        </div>
-        <div className="button-row">
-          <button type="button" disabled={!controlsEnabled} onClick={applyWindowToAllViews}>
-            Apply Window
-          </button>
-          <button type="button" disabled={!controlsEnabled} onClick={resetViews}>
-            Reset Views
-          </button>
-        </div>
+        {activeSegmentation ? (
+          <section className="segmentation-tools" aria-label="Segmentation tools">
+            <h2>Segmentation</h2>
+            <div className="segmented-control" role="group" aria-label="Interaction mode">
+              <button
+                type="button"
+                className={interactionMode === 'navigate' ? 'active' : ''}
+                onClick={() => setToolInteractionMode('navigate')}
+              >
+                Navigate
+              </button>
+              <button
+                type="button"
+                className={interactionMode === 'brush' ? 'active' : ''}
+                onClick={() => setToolInteractionMode('brush')}
+              >
+                Brush
+              </button>
+              <button
+                type="button"
+                className={interactionMode === 'erase' ? 'active' : ''}
+                onClick={() => setToolInteractionMode('erase')}
+              >
+                Erase
+              </button>
+            </div>
+            <label className="tool-field">
+              Label
+              <select
+                value={activeSegmentLabel}
+                onChange={event => setActiveSegmentLabel(Number(event.currentTarget.value))}
+              >
+                {editableLabels.map(label => (
+                  <option key={label} value={label}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <div className="tool-field">
+              <span>Radius</span>
+              <div className="stepper">
+                <button type="button" onClick={() => setBrushRadiusMm(brushRadiusMm - 0.5)}>-</button>
+                <output>{`${brushRadiusMm.toFixed(1)} mm`}</output>
+                <button type="button" onClick={() => setBrushRadiusMm(brushRadiusMm + 0.5)}>+</button>
+              </div>
+            </div>
+          </section>
+        ) : null}
         <section className="scene-browser" aria-label="Scene browser">
           <h2>Scene</h2>
           {sceneItems.length === 0 ? (
@@ -673,22 +728,6 @@ function MprApp() {
             </ul>
           )}
         </section>
-        <dl className="info">
-          <div><dt>Volume</dt><dd>{volumeInfo.volume}</dd></div>
-          <div><dt>Source</dt><dd>{volumeInfo.source}</dd></div>
-          {volumeInfo.affine ? <div className="matrix-row"><dt>Volume affine</dt><dd><pre>{volumeInfo.affine}</pre></dd></div> : null}
-          <div><dt>Seg</dt><dd>{segmentationInfo ? segmentationInfo.source : 'none'}</dd></div>
-          {segmentationInfo ? <div><dt>Labels</dt><dd>{`${segmentationInfo.labels} (${segmentationInfo.dtype})`}</dd></div> : null}
-          {segmentationInfo ? <div className="matrix-row"><dt>Segment affine</dt><dd><pre>{segmentationInfo.affine}</pre></dd></div> : null}
-          {volumeInfo.intensity ? <div><dt>Intensity</dt><dd>{volumeInfo.intensity}</dd></div> : null}
-          {volumeInfo.centerIndex ? <div><dt>Center index</dt><dd>{volumeInfo.centerIndex}</dd></div> : null}
-          <div><dt>Cursor</dt><dd>{cursorInfo ? cursorInfo.viewport : 'Move over a loaded view'}</dd></div>
-          <div><dt>Voxel</dt><dd>{cursorInfo ? cursorInfo.voxel : 'n/a'}</dd></div>
-          <div>
-            <dt>World</dt>
-            <dd>{cursorInfo ? `${cursorInfo.world}${cursorInfo.inBounds ? '' : ' (outside)'}` : 'n/a'}</dd>
-          </div>
-        </dl>
         {contextMenu ? (
           <div
             className="context-menu"
@@ -775,7 +814,61 @@ function SceneBrowserNode({
   )
 }
 
-function createSceneBrowserItems(scene: Engine['scene'], _version: number): SceneBrowserItem[] {
+function ProbeOverlay({ probeInfo }: { probeInfo: ProbeInfo }) {
+  return (
+    <dl className="probe-overlay">
+      <div>
+        <dt>IJK</dt>
+        <dd>{probeInfo.voxel.map(value => String(value)).join(', ')}</dd>
+      </div>
+      <div>
+        <dt>XYZ</dt>
+        <dd>{`${probeInfo.world}${probeInfo.inBounds ? '' : ' outside'}`}</dd>
+      </div>
+      <div>
+        <dt>I</dt>
+        <dd>{probeInfo.intensity}</dd>
+      </div>
+    </dl>
+  )
+}
+
+function BrushPreviewOverlay({ brushPreview }: { brushPreview: BrushPreviewInfo }) {
+  const diameter = Math.max(2, brushPreview.radiusPx * 2)
+  const className = [
+    'brush-preview',
+    brushPreview.mode === 'erase' ? 'erase' : 'paint',
+    brushPreview.valid ? '' : 'invalid',
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      style={{
+        width: diameter,
+        height: diameter,
+        left: brushPreview.point[0] - brushPreview.radiusPx,
+        top: brushPreview.point[1] - brushPreview.radiusPx,
+      }}
+    />
+  )
+}
+
+function firstEditableLabel(segmentation: LabelmapSegmentationData): number {
+  const labels = [...segmentation.segments.keys()].filter(label => label > 0).sort((a, b) => a - b)
+  return labels[0] ?? 1
+}
+
+function segmentLabelOptions(segmentation: LabelmapSegmentationData, activeLabel: number): number[] {
+  const labels = new Set<number>([activeLabel])
+  for (const label of segmentation.segments.keys()) {
+    if (label > 0) {
+      labels.add(label)
+    }
+  }
+  return [...labels].sort((a, b) => a - b)
+}
+
+function createSceneBrowserItems(scene: Scene | null, _version: number): SceneBrowserItem[] {
   if (!scene) {
     return []
   }
@@ -802,82 +895,80 @@ function createSceneBrowserItems(scene: Engine['scene'], _version: number): Scen
   })
 }
 
-function createVolumeInfo(volume: ScalarVolume, source: string, affine: Mat4): VolumeInfo {
-  const [min, max] = valueRange(volume)
-  const centerIndex = vec3.create(
-    (volume.shape[0] - 1) * 0.5,
-    (volume.shape[1] - 1) * 0.5,
-    (volume.shape[2] - 1) * 0.5,
-  )
-  return {
-    volume: volume.shape.join(' x '),
-    source,
-    affine: formatMat4Rows(affine),
-    intensity: `${formatNumber(min)} to ${formatNumber(max)}`,
-    centerIndex: Array.from(centerIndex, formatNumber).join(', '),
+function formatInput(value: number): string {
+  return Number.isFinite(value) ? String(Number(value.toPrecision(6))) : '0'
+}
+
+function shouldIgnoreKeyboardEvent(event: KeyboardEvent): boolean {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) {
+    return false
   }
-}
-
-function formatMat4Rows(matrix: Mat4): string {
-  return [
-    [matrix[0], matrix[4], matrix[8], matrix[12]],
-    [matrix[1], matrix[5], matrix[9], matrix[13]],
-    [matrix[2], matrix[6], matrix[10], matrix[14]],
-    [matrix[3], matrix[7], matrix[11], matrix[15]],
-  ].map(row => `[${row.map(formatAffineValue).join(', ')}]`).join('\n')
-}
-
-function formatAffineValue(value: number): string {
-  if (!Number.isFinite(value)) {
-    return 'n/a'
-  }
-  const normalized = Math.abs(value) < 5e-7 ? 0 : value
-  return normalized.toFixed(6).padStart(11, ' ')
-}
-
-function canvasToWorld(point: Vec2n, width: number, height: number, state: MprRenderState): Vec3 {
-  const dx = point[0] - 0.5 * width
-  const dy = point[1] - 0.5 * height
-  return vec3.add(
-    vec3.addScaled(state.plane.origin, state.plane.right, dx * state.plane.pixelSize),
-    vec3.scale(state.plane.up, -dy * state.plane.pixelSize),
-  )
-}
-
-function worldToIndex(world: Vec3, volume: ScalarVolume): Vec3 {
-  const worldToIndexMatrix = mat4.inverse(volume.indexToWorld)
-  return vec3.create(
-    worldToIndexMatrix[0] * world[0] + worldToIndexMatrix[4] * world[1] + worldToIndexMatrix[8] * world[2] + worldToIndexMatrix[12],
-    worldToIndexMatrix[1] * world[0] + worldToIndexMatrix[5] * world[1] + worldToIndexMatrix[9] * world[2] + worldToIndexMatrix[13],
-    worldToIndexMatrix[2] * world[0] + worldToIndexMatrix[6] * world[1] + worldToIndexMatrix[10] * world[2] + worldToIndexMatrix[14],
-  )
-}
-
-function sliceStepSize(worldNormal: Vec3, volume: ScalarVolume): number {
-  const worldToIndexMatrix = mat4.inverse(volume.indexToWorld)
-  const indexDirection = vec3.create(
-    worldToIndexMatrix[0] * worldNormal[0] + worldToIndexMatrix[4] * worldNormal[1] + worldToIndexMatrix[8] * worldNormal[2],
-    worldToIndexMatrix[1] * worldNormal[0] + worldToIndexMatrix[5] * worldNormal[1] + worldToIndexMatrix[9] * worldNormal[2],
-    worldToIndexMatrix[2] * worldNormal[0] + worldToIndexMatrix[6] * worldNormal[1] + worldToIndexMatrix[10] * worldNormal[2],
-  )
-  const indexUnitsPerWorldUnit = vec3.length(indexDirection)
-  return indexUnitsPerWorldUnit > 0 ? 1 / indexUnitsPerWorldUnit : 1
-}
-
-function isVoxelInBounds(voxel: Vec3n, volume: ScalarVolume): boolean {
-  return voxel.every((value, axis) => value >= 0 && value < volume.shape[axis])
-}
-
-function formatNumber(value: number): string {
-  return Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : 'n/a'
+  return target.isContentEditable
+    || target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || target instanceof HTMLButtonElement
 }
 
 function formatCoordinate(value: number): string {
   return Number.isFinite(value) ? value.toFixed(3) : 'n/a'
 }
 
-function formatInput(value: number): string {
-  return Number.isFinite(value) ? String(Number(value.toPrecision(6))) : '0'
+function formatIntensity(value: number): string {
+  return Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : 'n/a'
+}
+
+function readVolumeVoxel(volume: ScalarVolume, voxel: Vec3n): number {
+  const [x, y, z] = voxel
+  return volume.data[x + volume.shape[0] * (y + volume.shape[1] * z)]
+}
+
+function createToolRegistry(): ToolRegistry {
+  const registry = new ToolRegistry()
+  registry.register({ id: 'mpr.pan', create: () => new PanTool() })
+  registry.register({ id: 'mpr.windowLevel', create: () => new WindowLevelTool() })
+  registry.register({ id: 'mpr.stackScroll', create: () => new StackScrollTool() })
+  registry.register({ id: 'mpr.zoom', create: () => new ZoomTool() })
+  registry.register({ id: 'mpr.probe', create: () => new ProbeTool() })
+  registry.register({ id: 'seg.brush', create: () => new SegmentationBrushTool() })
+  return registry
+}
+
+function createDefaultToolGroups(registry: ToolRegistry): ToolGroupService {
+  const toolGroups = new ToolGroupService(registry)
+  toolGroups.createToolGroup(MPR_TOOL_GROUP_ID)
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.pan', {
+    mode: 'active',
+    bindings: [{ kind: 'drag', button: 0, modifiers: NO_MODIFIERS }],
+  })
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.windowLevel', {
+    mode: 'active',
+    bindings: [
+      { kind: 'drag', button: 0, modifiers: { ...NO_MODIFIERS, shift: true } },
+      { kind: 'drag', button: 2, modifiers: NO_MODIFIERS },
+    ],
+  })
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.stackScroll', {
+    mode: 'active',
+    bindings: [{ kind: 'wheel', modifiers: NO_MODIFIERS }],
+  })
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.zoom', {
+    mode: 'active',
+    bindings: [{ kind: 'wheel', modifiers: { ...NO_MODIFIERS, ctrl: true } }],
+  })
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.probe', {
+    mode: 'passive',
+    bindings: [{ kind: 'hover' }],
+  })
+  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'seg.brush', {
+    mode: 'disabled',
+    bindings: [
+      { kind: 'drag', button: 0, modifiers: NO_MODIFIERS },
+      { kind: 'hover' },
+    ],
+  })
+  return toolGroups
 }
 
 function errorMessage(error: unknown): string {

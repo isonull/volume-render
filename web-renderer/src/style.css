@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -113,6 +114,61 @@ canvas {
   font-weight: 650;
 }
 
+.probe-overlay {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: grid;
+  max-width: calc(100% - 24px);
+  gap: 3px;
+  margin: 0;
+  border: 1px solid rgba(166, 177, 194, 0.24);
+  border-radius: 6px;
+  background: rgba(11, 13, 16, 0.76);
+  padding: 7px 9px;
+  color: #dce4ef;
+  font: 12px/1.35 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  pointer-events: none;
+}
+
+.probe-overlay div {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.probe-overlay dt {
+  color: #8f9bad;
+}
+
+.probe-overlay dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brush-preview {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid #65d6a6;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(5, 6, 8, 0.75), 0 0 14px rgba(101, 214, 166, 0.32);
+  pointer-events: none;
+}
+
+.brush-preview.erase {
+  border-color: #ff8a65;
+  box-shadow: 0 0 0 1px rgba(5, 6, 8, 0.75), 0 0 14px rgba(255, 138, 101, 0.32);
+}
+
+.brush-preview.invalid {
+  border-color: #8f9bad;
+  box-shadow: 0 0 0 1px rgba(5, 6, 8, 0.75);
+  opacity: 0.58;
+}
+
 .controls {
   overflow: auto;
   border-left: 1px solid #242b36;
@@ -163,7 +219,18 @@ input {
   padding: 6px 8px;
 }
 
+select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid #303a49;
+  border-radius: 6px;
+  color: #eef2f8;
+  background: #0c1016;
+  padding: 6px 8px;
+}
+
 input:focus-visible,
+select:focus-visible,
 button:focus-visible {
   outline: 2px solid #6bb6ff;
   outline-offset: 2px;
@@ -173,22 +240,70 @@ input[type="file"] {
   padding: 8px;
 }
 
-.control-grid {
+.segmentation-tools {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 12px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #26303d;
 }
 
-.control-grid label {
+.segmentation-tools h2 {
+  margin: 0;
+  color: #f0f4fa;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid #303a49;
+  border-radius: 6px;
+}
+
+.segmented-control button {
+  border: 0;
+  border-radius: 0;
+  background: #0c1016;
+}
+
+.segmented-control button.active {
+  background: #315071;
+}
+
+.tool-field {
   display: grid;
   gap: 6px;
 }
 
-.button-row {
+.tool-field span {
+  color: #aeb8c7;
+  font-weight: 560;
+}
+
+.stepper {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 12px;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.stepper button {
+  min-width: 34px;
+  padding: 6px 0;
+}
+
+.stepper output {
+  min-width: 0;
+  border: 1px solid #303a49;
+  border-radius: 6px;
+  background: #0c1016;
+  padding: 6px 8px;
+  color: #eef2f8;
+  text-align: center;
 }
 
 .scene-browser {
@@ -314,46 +429,6 @@ fieldset {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-}
-
-.info {
-  display: grid;
-  gap: 8px;
-  margin: 18px 0 0;
-  padding-top: 16px;
-  border-top: 1px solid #26303d;
-}
-
-.info div {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 10px;
-}
-
-.info dt {
-  color: #8894a5;
-}
-
-.info dd {
-  margin: 0;
-  color: #e3e8f0;
-  overflow-wrap: anywhere;
-}
-
-.info .matrix-row {
-  grid-template-columns: 1fr;
-  gap: 5px;
-}
-
-.info pre {
-  margin: 0;
-  overflow-x: auto;
-  border: 1px solid #26303d;
-  border-radius: 6px;
-  background: #0c1016;
-  padding: 8px;
-  color: #dce4ef;
-  font: 12px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 @media (max-width: 860px) {

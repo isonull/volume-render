@@ -25,8 +25,8 @@ export type Box3i = {
 export class Scene {
   readonly id: string
   version = 0
-  readonly volumes = new Map<string, ScalarVolume>()
-  readonly segmentations = new Map<string, LabelmapSegmentationData>()
+  private readonly volumeMap = new Map<string, ScalarVolume>()
+  private readonly segmentationMap = new Map<string, LabelmapSegmentationData>()
   private readonly inverseIndexToWorld = new Map<string, Mat4>()
   private readonly inverseSegmentationIndexToWorld = new Map<string, Mat4>()
 
@@ -34,9 +34,24 @@ export class Scene {
     this.id = id
   }
 
+  get volumes(): ReadonlyMap<string, ScalarVolume> {
+    return this.volumeMap
+  }
+
+  get segmentations(): ReadonlyMap<string, LabelmapSegmentationData> {
+    return this.segmentationMap
+  }
+
   transaction<T>(fn: (tx: SceneTransaction) => T): SceneChangeSet<T> {
     const changes: SceneChange[] = []
-    const tx = new SceneTransaction(this, changes)
+    const tx = new SceneTransaction({
+      addVolume: volume => this.addVolumeInternal(volume),
+      removeVolume: volumeId => this.removeVolumeInternal(volumeId),
+      updateVolume: volumeId => this.requireVolume(volumeId),
+      addSegmentation: segmentation => this.addSegmentationInternal(segmentation),
+      updateSegmentation: segmentationId => this.requireSegmentation(segmentationId),
+      removeSegmentation: segmentationId => this.removeSegmentationInternal(segmentationId),
+    }, changes)
     const versionBefore = this.version
     const result = fn(tx)
 
@@ -74,7 +89,7 @@ export class Scene {
   }
 
   requireVolume(volumeId: string): ScalarVolume {
-    const volume = this.volumes.get(volumeId)
+    const volume = this.volumeMap.get(volumeId)
     if (!volume) {
       throw new Error(`Scene volume not found: ${volumeId}`)
     }
@@ -82,34 +97,34 @@ export class Scene {
   }
 
   requireSegmentation(segmentationId: string): LabelmapSegmentationData {
-    const segmentation = this.segmentations.get(segmentationId)
+    const segmentation = this.segmentationMap.get(segmentationId)
     if (!segmentation) {
       throw new Error(`Scene segmentation not found: ${segmentationId}`)
     }
     return segmentation
   }
 
-  addVolumeInternal(volume: ScalarVolume): void {
-    if (this.volumes.has(volume.id)) {
+  private addVolumeInternal(volume: ScalarVolume): void {
+    if (this.volumeMap.has(volume.id)) {
       throw new Error(`Scene volume already exists: ${volume.id}`)
     }
-    this.volumes.set(volume.id, volume)
+    this.volumeMap.set(volume.id, volume)
     this.inverseIndexToWorld.set(volume.id, mat4.inverse(volume.indexToWorld))
   }
 
-  removeVolumeInternal(volumeId: string): void {
+  private removeVolumeInternal(volumeId: string): void {
     this.requireVolume(volumeId)
-    for (const segmentation of this.segmentations.values()) {
+    for (const segmentation of this.segmentationMap.values()) {
       if (segmentation.sourceVolumeId === volumeId) {
         throw new Error(`Cannot remove volume ${volumeId} while segmentation ${segmentation.id} references it.`)
       }
     }
-    this.volumes.delete(volumeId)
+    this.volumeMap.delete(volumeId)
     this.inverseIndexToWorld.delete(volumeId)
   }
 
-  addSegmentationInternal(segmentation: LabelmapSegmentationData): void {
-    if (this.segmentations.has(segmentation.id)) {
+  private addSegmentationInternal(segmentation: LabelmapSegmentationData): void {
+    if (this.segmentationMap.has(segmentation.id)) {
       throw new Error(`Scene segmentation already exists: ${segmentation.id}`)
     }
 
@@ -123,53 +138,62 @@ export class Scene {
       throw new Error(`Segmentation ${segmentation.id} indexToWorld does not exactly match source volume ${sourceVolume.id}.`)
     }
 
-    this.segmentations.set(segmentation.id, segmentation)
+    this.segmentationMap.set(segmentation.id, segmentation)
     this.inverseSegmentationIndexToWorld.set(segmentation.id, mat4.inverse(segmentation.indexToWorld))
   }
 
-  removeSegmentationInternal(segmentationId: string): void {
+  private removeSegmentationInternal(segmentationId: string): void {
     this.requireSegmentation(segmentationId)
-    this.segmentations.delete(segmentationId)
+    this.segmentationMap.delete(segmentationId)
     this.inverseSegmentationIndexToWorld.delete(segmentationId)
   }
 }
 
+type SceneTransactionOps = {
+  addVolume(volume: ScalarVolume): void
+  removeVolume(volumeId: string): void
+  updateVolume(volumeId: string): void
+  addSegmentation(segmentation: LabelmapSegmentationData): void
+  updateSegmentation(segmentationId: string): void
+  removeSegmentation(segmentationId: string): void
+}
+
 export class SceneTransaction {
-  private readonly scene: Scene
+  private readonly ops: SceneTransactionOps
   private readonly changes: SceneChange[]
 
-  constructor(scene: Scene, changes: SceneChange[]) {
-    this.scene = scene
+  constructor(ops: SceneTransactionOps, changes: SceneChange[]) {
+    this.ops = ops
     this.changes = changes
   }
 
   addVolume(volume: ScalarVolume): void {
-    this.scene.addVolumeInternal(volume)
+    this.ops.addVolume(volume)
     this.changes.push({ type: 'volume.added', volumeId: volume.id })
   }
 
   removeVolume(volumeId: string): void {
-    this.scene.removeVolumeInternal(volumeId)
+    this.ops.removeVolume(volumeId)
     this.changes.push({ type: 'volume.removed', volumeId })
   }
 
   updateVolume(volumeId: string, regions?: Box3i[]): void {
-    this.scene.requireVolume(volumeId)
+    this.ops.updateVolume(volumeId)
     this.changes.push({ type: 'volume.changed', volumeId, regions })
   }
 
   addSegmentation(segmentation: LabelmapSegmentationData): void {
-    this.scene.addSegmentationInternal(segmentation)
+    this.ops.addSegmentation(segmentation)
     this.changes.push({ type: 'segmentation.added', segmentationId: segmentation.id })
   }
 
   updateSegmentation(segmentationId: string, regions?: Box3i[]): void {
-    this.scene.requireSegmentation(segmentationId)
+    this.ops.updateSegmentation(segmentationId)
     this.changes.push({ type: 'segmentation.changed', segmentationId, regions })
   }
 
   removeSegmentation(segmentationId: string): void {
-    this.scene.removeSegmentationInternal(segmentationId)
+    this.ops.removeSegmentation(segmentationId)
     this.changes.push({ type: 'segmentation.removed', segmentationId })
   }
 }
