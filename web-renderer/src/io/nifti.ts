@@ -33,9 +33,15 @@ export interface NiftiFile {
   image: ArrayBuffer
 }
 
+export interface NiftiExport {
+  readonly fileName: string
+  readonly data: ArrayBuffer
+}
+
 const NIFTI_INTENT_LABEL = 1002
 const NIFTI_INTENT_SYMMATRIX = 1005
 const NIFTI_INTENT_VECTOR = 1007
+const NIFTI_SINGLE_FILE_VOX_OFFSET = 352
 
 export async function loadNiftiFile(file: File): Promise<NiftiFile> {
   const source = await file.arrayBuffer()
@@ -160,6 +166,35 @@ function segmentationIdFromFileName(sourceVolumeId: string, fileName?: string): 
     .replace(/[^a-zA-Z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '')
   return base ? `${sourceVolumeId}-segmentation-${base}` : `${sourceVolumeId}-segmentation`
+}
+
+export function niftiFileFromScalarVolume(volume: ScalarVolume): NiftiExport {
+  const header = createNiftiHeader({
+    shape: volume.shape,
+    data: volume.data,
+    indexToWorld: volume.indexToWorld,
+    intentCode: 0,
+    description: 'web-renderer scalar volume',
+  })
+  return {
+    fileName: exportFileName(volume.source?.uri ?? volume.id, 'volume'),
+    data: combineHeaderAndImage(header, bytesOfTypedArray(volume.data)),
+  }
+}
+
+export function niftiFileFromLabelmapSegmentation(segmentation: LabelmapSegmentationData): NiftiExport {
+  const header = createNiftiHeader({
+    shape: segmentation.shape,
+    data: segmentation.data,
+    indexToWorld: segmentation.indexToWorld,
+    intentCode: NIFTI_INTENT_LABEL,
+    description: 'web-renderer labelmap',
+    intentName: 'labelmap',
+  })
+  return {
+    fileName: exportFileName(segmentation.id, 'segmentation'),
+    data: combineHeaderAndImage(header, bytesOfTypedArray(segmentation.data)),
+  }
 }
 
 function sameShape(a: Vec3n, b: Vec3n): boolean {
@@ -479,4 +514,128 @@ function toArrayBuffer(data: ArrayBuffer | ArrayBufferLike): ArrayBuffer {
     return data
   }
   return new Uint8Array(data).slice().buffer
+}
+
+function createNiftiHeader(options: {
+  shape: Vec3n
+  data: ScalarVoxelArray | LabelmapVoxelArray
+  indexToWorld: Mat4
+  intentCode: number
+  description: string
+  intentName?: string
+}): NIFTI1 {
+  const header = new NIFTI1()
+  const affineRows = mat4ToNiftiAffineRows(options.indexToWorld)
+  const spacing = spacingFromAffineRows(affineRows)
+  const [min, max] = valueRange(options.data)
+  header.littleEndian = true
+  header.dims = [3, options.shape[0], options.shape[1], options.shape[2], 1, 1, 1, 1]
+  header.pixDims = [1, spacing[0], spacing[1], spacing[2], 1, 1, 1, 1]
+  header.vox_offset = NIFTI_SINGLE_FILE_VOX_OFFSET
+  header.scl_slope = 1
+  header.scl_inter = 0
+  header.xyzt_units = NIFTI1.UNITS_MM
+  header.datatypeCode = niftiDatatypeCode(options.data)
+  header.numBitsPerVoxel = options.data.BYTES_PER_ELEMENT * 8
+  header.intent_code = options.intentCode
+  header.cal_min = min
+  header.cal_max = max
+  header.qform_code = NIFTI1.XFORM_UNKNOWN
+  header.sform_code = NIFTI1.XFORM_SCANNER_ANAT
+  header.affine = affineRows
+  header.description = truncateAscii(options.description, 80)
+  header.intent_name = truncateAscii(options.intentName ?? '', 16)
+  header.magic = 'n+1'
+  return header
+}
+
+function combineHeaderAndImage(header: NIFTI1, imageBytes: Uint8Array): ArrayBuffer {
+  const headerBytes = new Uint8Array(header.toArrayBuffer(false))
+  const out = new Uint8Array(headerBytes.byteLength + imageBytes.byteLength)
+  out.set(headerBytes, 0)
+  out.set(imageBytes, headerBytes.byteLength)
+  return out.buffer
+}
+
+function bytesOfTypedArray(data: ScalarVoxelArray | LabelmapVoxelArray): Uint8Array {
+  return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+}
+
+function niftiDatatypeCode(data: ScalarVoxelArray | LabelmapVoxelArray): number {
+  if (data instanceof Uint8Array) {
+    return NIFTI1.TYPE_UINT8
+  }
+  if (data instanceof Int8Array) {
+    return NIFTI1.TYPE_INT8
+  }
+  if (data instanceof Int16Array) {
+    return NIFTI1.TYPE_INT16
+  }
+  if (data instanceof Uint16Array) {
+    return NIFTI1.TYPE_UINT16
+  }
+  if (data instanceof Int32Array) {
+    return NIFTI1.TYPE_INT32
+  }
+  if (data instanceof Uint32Array) {
+    return NIFTI1.TYPE_UINT32
+  }
+  if (data instanceof Float32Array) {
+    return NIFTI1.TYPE_FLOAT32
+  }
+  return NIFTI1.TYPE_FLOAT64
+}
+
+function mat4ToNiftiAffineRows(matrix: Mat4): number[][] {
+  const rowMajorAffine = mat4.transpose(matrix)
+  return [
+    [rowMajorAffine[0], rowMajorAffine[1], rowMajorAffine[2], rowMajorAffine[3]],
+    [rowMajorAffine[4], rowMajorAffine[5], rowMajorAffine[6], rowMajorAffine[7]],
+    [rowMajorAffine[8], rowMajorAffine[9], rowMajorAffine[10], rowMajorAffine[11]],
+    [rowMajorAffine[12], rowMajorAffine[13], rowMajorAffine[14], rowMajorAffine[15]],
+  ]
+}
+
+function spacingFromAffineRows(rows: number[][]): Vec3n {
+  return [
+    vectorLength(rows[0][0], rows[1][0], rows[2][0]),
+    vectorLength(rows[0][1], rows[1][1], rows[2][1]),
+    vectorLength(rows[0][2], rows[1][2], rows[2][2]),
+  ]
+}
+
+function vectorLength(x: number, y: number, z: number): number {
+  const length = Math.hypot(x, y, z)
+  return Number.isFinite(length) && length > 0 ? length : 1
+}
+
+function valueRange(data: ScalarVoxelArray | LabelmapVoxelArray): [number, number] {
+  if (data.length === 0) {
+    return [0, 0]
+  }
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (const value of data) {
+    if (!Number.isFinite(value)) {
+      continue
+    }
+    min = Math.min(min, value)
+    max = Math.max(max, value)
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? [min, max] : [0, 0]
+}
+
+function exportFileName(source: string, fallback: string): string {
+  const leaf = source.split(/[\\/]/).pop() ?? source
+  const base = leaf
+    .replace(/\.nii(?:\.gz)?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return `${base || fallback}.nii`
+}
+
+function truncateAscii(value: string, maxBytes: number): string {
+  return value
+    .replace(/[^\x20-\x7e]+/g, ' ')
+    .slice(0, maxBytes)
 }

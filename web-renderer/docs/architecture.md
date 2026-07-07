@@ -31,6 +31,8 @@
     - [ADR-08 Rendering Is Request-Based, Not Continuous](#adr-08-rendering-is-request-based-not-continuous)
     - [ADR-09 Imported Labelmaps Must Match Their Source Volume](#adr-09-imported-labelmaps-must-match-their-source-volume)
     - [ADR-10 WebGPU Type Constraints Stay at the Boundary](#adr-10-webgpu-type-constraints-stay-at-the-boundary)
+    - [ADR-11 Extensions Contribute Capabilities, Not Hidden Mutation Paths](#adr-11-extensions-contribute-capabilities-not-hidden-mutation-paths)
+    - [ADR-12 Extension UI Contributions Are Typed Host Slots](#adr-12-extension-ui-contributions-are-typed-host-slots)
   - [6. Module Overview](#6-module-overview)
     - [6.1 Entry and UI](#61-entry-and-ui)
     - [6.2 Scene Model](#62-scene-model)
@@ -41,6 +43,8 @@
     - [6.7 Viewport Model](#67-viewport-model)
     - [6.8 MPR Renderer Module](#68-mpr-renderer-module)
     - [6.9 PBR Renderer Module](#69-pbr-renderer-module)
+    - [6.10 Extension Runtime](#610-extension-runtime)
+    - [6.11 UI Contribution Model](#611-ui-contribution-model)
   - [7. Ownership Rules](#7-ownership-rules)
     - [7.1 What Each Layer Owns](#71-what-each-layer-owns)
     - [7.2 Ownership That Is Intentionally Avoided](#72-ownership-that-is-intentionally-avoided)
@@ -103,6 +107,7 @@ mutation boundary:
 | Runtime services    | Application state ownership and lifecycle     |
 | Commands            | Explicit mutation boundary                    |
 | Tools and input     | User input interpretation                     |
+| Extension runtime   | Compile-time workflow composition            |
 | Renderers           | GPU resources and drawing                     |
 | React entry         | UI composition and wiring                     |
 
@@ -121,6 +126,11 @@ plugin systems to be added later without rewriting the entry point.
 ```text
 +-------------------------------------------------------------+
 |  React Entry (UI composition, DOM wiring)                   |
++-------------------------------------------------------------+
+                          |
+                          v
++-------------------------------------------------------------+
+|  Extension Host (static extension activation/contributions) |
 +-------------------------------------------------------------+
                           |
                           v
@@ -417,6 +427,77 @@ upload boundary.
 - Swapping a renderer does not require changing data classes.
 - The upload path is the only place that needs to know about WebGPU types.
 
+### ADR-11 Extensions Contribute Capabilities, Not Hidden Mutation Paths
+
+| Field        | Value                                                |
+| ------------ | ---------------------------------------------------- |
+| ID           | ADR-11                                               |
+| Status       | Accepted                                             |
+| Affects      | Extension host, commands, tools, panels, services    |
+
+**Context.** Workflow features such as first-party segmentation tools or
+server-backed AI sessions need to add commands, tools, panels, and services
+without turning `mpr.tsx` into a manual registry for every feature.
+
+**Decision.** `web-renderer` uses a compile-time extension host. Extensions may
+contribute commands, tools, services, right-side panels, workflow tool panels,
+scene context actions, segment context actions, and lifecycle hooks through
+`ExtensionContext`. They may own external sessions or transient workflow state,
+but they must mutate `Scene` data only through commands, services, and scene
+transactions.
+
+**Consequences.**
+
+- The React entry creates runtime services and activates extensions, but does
+  not own feature-specific workflow logic.
+- First-party features can use the same contribution path as optional workflow
+  integrations.
+- Extension services are allowed to hold leases, capabilities, and UI state for
+  external workflows.
+- Renderer, shader, IO format, and persistent data model extension points are
+  not part of the first extension surface.
+
+### ADR-12 Extension UI Contributions Are Typed Host Slots
+
+| Field        | Value                                                |
+| ------------ | ---------------------------------------------------- |
+| ID           | ADR-12                                               |
+| Status       | Accepted                                             |
+| Affects      | Extension host, UI composition, panels, context actions |
+
+**Context.** Workflow extensions need to place UI into the application without
+making the React entry know feature-specific concepts such as brush workflow
+state, nnInteractive prompt controls, or future AI tool panels. UI entry points
+also need stable context: some target the whole scene item, while others target
+one segment label inside one segmentation.
+
+**Decision.** Extension UI is a first-class compile-time contribution surface.
+The host owns typed slots and routing rules; extensions contribute declarative
+entries for those slots. The initial accepted UI contribution types are:
+
+| Contribution type | Host slot / trigger                         | Target context                                  |
+| ----------------- | ------------------------------------------- | ----------------------------------------------- |
+| `panels`          | Right-side application panel list           | Whole app runtime through `ExtensionContext`    |
+| `toolPanels`      | Workflow panel slot inside segmentation UI  | Active segmentation id and segment label        |
+| `sceneActions`    | Scene browser context menu                  | Volume or whole segmentation                    |
+| `segmentActions`  | Segment row context menu                    | One label inside one segmentation               |
+
+The host may decide where these slots are rendered, how they are ordered, and
+when they are visible. Extensions may render UI and dispatch commands from
+those slots, but they must not mutate `Scene` data, GPU resources, renderer
+caches, or tool state outside the existing command/service APIs.
+
+**Consequences.**
+
+- UI contribution is now part of the architecture for first-party compile-time
+  extensions.
+- `mpr.tsx` remains a composition layer: it wires host slots but does not
+  contain feature-specific brush or nnInteractive branches.
+- Context menu actions and panels are separated by target scope, preventing
+  scene-level actions from being reused for per-segment workflows.
+- The current contract is not a remote plugin API and does not promise stable
+  binary or marketplace compatibility.
+
 ---
 
 ## 6. Module Overview
@@ -492,12 +573,27 @@ boundary.
 
 | Aspect       | Detail                                            |
 | ------------ | ------------------------------------------------- |
-| Files        | `src/tools/toolInput.ts`, `src/tools/tool.ts`, `src/tools/toolRegistry.ts`, `src/tools/toolGroupService.ts`, `src/tools/toolController.ts`, `src/tools/inputRouter.ts`, `src/tools/mprTools.ts` |
+| Files        | `src/tools/toolInput.ts`, `src/tools/tool.ts`, `src/tools/toolRegistry.ts`, `src/tools/toolGroupService.ts`, `src/tools/toolController.ts`, `src/tools/inputRouter.ts` |
 | Owns         | DOM input normalization, tool interfaces and bindings, tool factory registration, tool group attachment, tool selection per input event, gesture lifecycle, conversion to command execution or transient UI feedback |
 
 The focus of the Tool framework is not a specific tool; it is separating input
 response from React canvas handlers. This allows new tool types, binding
 strategies, or plugin registration approaches to be added later.
+
+Tool modes use Cornerstone-style semantics so interaction tools, future
+annotations, and future renderable tool overlays can share one vocabulary:
+
+| Tool mode  | Semantics                                                   |
+| ---------- | ----------------------------------------------------------- |
+| `active`   | Can create or execute the primary operation, edit existing objects, and render. |
+| `passive`  | Can edit existing objects and render, but cannot create new objects. |
+| `enabled`  | Can render only, without interaction.                       |
+| `disabled` | Cannot render or interact.                                  |
+
+The initial MPR implementation primarily uses modes for input routing, and not
+every tool has editable or renderable objects yet. New tool types should still
+preserve these meanings so annotation, measurement, overlay, and workflow tools
+can be composed without redefining mode behavior.
 
 ### 6.7 Viewport Model
 
@@ -513,12 +609,18 @@ the attachment point for render state.
 
 | Aspect       | Detail                                            |
 | ------------ | ------------------------------------------------- |
-| Files        | `src/mpr/mprRenderer.ts`, `src/mpr/mprMath.ts`, `src/mpr/shaders/mpr.wgsl` |
-| Owns         | GPU resource preparation from `Scene`, prepared-scene resource cache, viewport output drawing from render state, shared math for coordinate conversion and sampling |
+| Files        | `src/mpr/mprRenderer.ts`, `src/mpr/mprMath.ts`, `src/mpr/mprState.ts`, `src/mpr/mprTools.ts`, `src/mpr/shaders/mpr.wgsl` |
+| Owns         | GPU resource preparation from `Scene`, prepared-scene resource cache, viewport output drawing from render state, shared math for coordinate conversion and sampling, MPR-specific tool adapters |
 
 The Renderer module may read the `Scene` and render state, but must not become
 the owner of `Scene` facts. The renderer's internal cache must be invalidated
 and rebuilt through `SceneChangeSet`.
+
+MPR-specific tools live in the MPR module because they translate generic tool
+events into MPR viewport intent such as panning, slice scrolling, window/level,
+probe feedback, zooming, and MPR-scoped segmentation brush edits. The generic
+Tool framework owns the input lifecycle; the MPR module owns these concrete MPR
+tool implementations.
 
 ### 6.9 PBR Renderer Module
 
@@ -529,6 +631,80 @@ and rebuilt through `SceneChangeSet`.
 
 PBR and MPR are different rendering backends. They may share the underlying
 data model, but should not share renderer-internal state.
+
+### 6.10 Extension Runtime
+
+| Aspect       | Detail                                            |
+| ------------ | ------------------------------------------------- |
+| Files        | `src/extensions/*`, `src/extensions/core/*`, `src/extensions/nninteractive/*` |
+| Owns         | Static extension activation, contribution collection, extension service lookup, runtime event bus, interaction mode contributions, extension lifecycle cleanup |
+
+Extensions are loaded by the React entry from compile-time imports. The core
+extension contributes the built-in MPR commands, tools, segmentation panel, and
+scene context actions. Workflow integrations, such as `nninteractive`, use the
+same `WebRendererExtension` contract and communicate with the app through
+commands, services, tools, panels, and runtime events.
+
+The extension host collects both scene-level actions and segment-level actions.
+Scene actions target volumes or whole segmentations in the Scene browser.
+Segment actions target one label inside one segmentation and are rendered by
+the segmentation panel. Workflow-specific UI that is opened from a segment
+action is contributed as a tool panel and rendered inside the segmentation
+panel's tool-panel slot. This keeps `mpr.tsx` responsible for composition only;
+it does not hard-code brush or nnInteractive workflow UI.
+
+An extension service may own external session state, for example a server lease
+or prediction status. It must not mutate labelmaps, scene facts, renderer
+caches, or viewport render state behind the command/service boundary.
+
+### 6.11 UI Contribution Model
+
+| Aspect       | Detail                                            |
+| ------------ | ------------------------------------------------- |
+| Files        | `src/extensions/types.ts`, `src/extensions/extensionHost.ts`, `src/mpr.tsx`, extension-specific `.tsx` files |
+| Owns         | Typed UI contribution contracts, host slot collection, contribution ordering, target-context routing |
+
+The UI contribution model is the formal way for compile-time extensions to add
+feature UI. The host defines slots and target contexts; extensions contribute
+entries for those slots. The entry point and host may compose these entries, but
+feature behavior remains in the owning extension.
+
+| Type | Owner | Rendered or invoked by | Scope |
+| ---- | ----- | ---------------------- | ----- |
+| `ExtensionPanelContribution` | Extension | Right-side app panel list | App/runtime level |
+| `ExtensionToolPanelContribution` | Extension | Active tool-panel slot | Workflow level for a selected segment |
+| `SceneActionContribution` | Extension | Scene browser context menu | Volume or whole segmentation |
+| `SegmentActionContribution` | Extension | Segment list context menu | One segment label inside one segmentation |
+
+The current host slots are intentionally few:
+
+- The right-side app panel list is for broad, persistent UI such as the
+  Segmentation panel.
+- The segmentation panel owns the segment list and renders the active
+  workflow tool panel in its tool-panel slot.
+- The Scene browser owns scene context menus for volumes and whole
+  segmentations.
+- The segment list owns segment context menus for label-scoped workflows such
+  as Brush, nnInteractive, and Delete.
+
+Contribution implementations must follow these rules:
+
+- A contribution may read runtime state through `ExtensionContext`.
+- A contribution may update presentation state through app callbacks such as
+  `setActiveToolPanel`, `setStatus`, or `invalidateUi`.
+- A contribution must dispatch commands for durable state changes.
+- A contribution must not directly mutate `Scene`, labelmap voxel arrays,
+  renderer caches, WebGPU resources, or another extension's service internals.
+- A workflow tool panel must provide an exit path that returns to a neutral
+  interaction mode such as `core.navigate`.
+- A segment action must receive all target identity through
+  `SegmentContextItem`; it must not infer the target only from global active
+  segmentation state.
+
+`ActiveToolPanel` is currently an app-level singleton. This is deliberate for
+the first UI contribution model: the application presents one active workflow
+panel at a time while allowing services, such as nnInteractive, to preserve
+their own external sessions until an explicit release or lifecycle cleanup.
 
 ---
 
@@ -602,6 +778,8 @@ When adding a new feature, choose the layer by ownership:
 | A new operation                  | A command                                              |
 | A new user interaction           | A tool and its binding                                 |
 | A new runtime owner              | A new service, only if it has a stable long-lived responsibility |
+| A new workflow integration       | A compile-time extension with services, commands, tools, panels, and lifecycle cleanup |
+| A new app or workflow UI surface | An extension UI contribution in the correct host slot |
 | A new GPU representation         | The renderer and the `PreparedScene` invalidation path |
 | A new file format                | The IO layer                                           |
 
@@ -609,9 +787,13 @@ When adding a new feature, choose the layer by ownership:
 
 - Do not add feature logic directly to the React entry unless it is purely
   presentation.
+- Do not bypass the extension contribution surface for workflow integrations.
+- Do not add feature-specific workflow panels or context menu actions directly
+  to `mpr.tsx`.
 - Do not add renderer code that silently changes CPU-side data facts.
 - Do not introduce a service whose lifetime is tied to a single command.
 - Do not let a tool mutate `Scene` data without going through a transaction.
+- Do not let an extension service directly patch `Scene` data or GPU resources.
 
 ---
 
@@ -625,6 +807,12 @@ When adding a new feature, choose the layer by ownership:
 | Render state          | View parameters (camera, plane, windowing, overlays) for a single viewport.      |
 | `CommandDispatcher`   | The only mutation boundary between tools or UI and services.                     |
 | `CommandContext`      | The object passed to commands, exposing services and render scheduling.          |
+| `ExtensionContext`    | The object passed to extensions, exposing commands, tools, services, events, and UI callbacks. |
+| Extension contribution | A typed declaration from an extension that the host collects and renders or invokes in a known slot. |
+| App panel             | A right-side UI contribution rendered at app level.                              |
+| Tool panel            | A workflow UI contribution rendered for the current active tool-panel target.     |
+| Scene action          | A context menu contribution for a volume or whole segmentation.                  |
+| Segment action        | A context menu contribution for one label inside one segmentation.               |
 | Affine                | The 4x4 matrix describing voxel-to-world mapping for a volume.                   |
 | Labelmap              | A per-voxel integer segmentation aligned to a source volume.                     |
 
@@ -635,11 +823,12 @@ When adding a new feature, choose the layer by ownership:
 The current architecture leaves room for these future systems, but does not
 require them yet:
 
-- Plugin runtime
+- Remote dynamic plugin runtime
 - Command history and undo/redo
 - Multi-scene workspace
 - Cross-renderer synchronization service
-- Server-backed workflow sessions
+- General-purpose server-backed workflow framework beyond statically registered extensions
+- Renderer, shader, IO, or persistent data model extension points
 - Full annotation framework
 
 They should be added only when their ownership and lifecycle are clear enough

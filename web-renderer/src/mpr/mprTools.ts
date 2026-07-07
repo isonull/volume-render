@@ -6,13 +6,13 @@ import {
   ZOOM_MPR_PLANE_COMMAND,
 } from '../commands/mprCommands'
 import { EDIT_LABELMAP_COMMAND } from '../commands/segmentationCommands'
-import { worldToIndex } from '../mpr/mprMath'
+import { worldToIndex } from './mprMath'
 import type { Vec2n, Vec3, Vec3n } from 'wgpu-matrix'
-import type { MprRenderState } from '../mpr/mprState'
+import type { MprRenderState } from './mprState'
 import type { LabelmapVoxelEdit } from '../services/segmentationService'
 import type { ScalarVolume } from '../volume'
-import type { DragTool, HoverTool, ToolContext, WheelTool } from './tool'
-import type { ToolInputEvent } from './toolInput'
+import type { DragTool, HoverTool, ToolContext, WheelTool } from '../tools/tool'
+import type { ToolInputEvent } from '../tools/toolInput'
 
 export class PanTool implements DragTool {
   readonly id = 'mpr.pan'

@@ -11,6 +11,7 @@ export const CENTER_VOLUME_COMMAND = 'mpr.centerVolume'
 export const PAN_MPR_PLANE_COMMAND = 'mpr.panPlane'
 export const MOVE_MPR_SLICE_COMMAND = 'mpr.moveSlice'
 export const ZOOM_MPR_PLANE_COMMAND = 'mpr.zoomPlane'
+export const FLIP_MPR_PLANE_AXIS_COMMAND = 'mpr.flipPlaneAxis'
 export const WINDOW_LEVEL_COMMAND = 'mpr.windowLevel'
 export const SYNC_WINDOW_LEVEL_COMMAND = 'mpr.syncWindowLevel'
 export const SET_OVERLAY_SEGMENTATION_COMMAND = 'mpr.setOverlaySegmentation'
@@ -122,6 +123,21 @@ export class ZoomMprPlaneCommand implements Command<{ viewportId: string; deltaY
   }
 }
 
+export class FlipMprPlaneAxisCommand implements Command<{ viewportId: string; axis: 'right' | 'up' }, void> {
+  readonly id = FLIP_MPR_PLANE_AXIS_COMMAND
+
+  execute(options: { viewportId: string; axis: 'right' | 'up' }, context: CommandContext): void {
+    const state = context.viewportService.getRenderState(options.viewportId)
+    if (!state) {
+      return
+    }
+    const next = cloneMprState(state)
+    next.plane[options.axis] = vec3.negate(next.plane[options.axis])
+    context.viewportService.setRenderState(options.viewportId, next)
+    context.renderService.requestRender(options.viewportId)
+  }
+}
+
 export class WindowLevelCommand implements Command<{ viewportId: string; delta: Vec2n }, MprRenderState | null> {
   readonly id = WINDOW_LEVEL_COMMAND
 
@@ -196,6 +212,7 @@ export function createMprCommands(): Command[] {
     new PanMprPlaneCommand(),
     new MoveMprSliceCommand(),
     new ZoomMprPlaneCommand(),
+    new FlipMprPlaneAxisCommand(),
     new WindowLevelCommand(),
     new SyncWindowLevelCommand(),
     new SetOverlaySegmentationCommand(),

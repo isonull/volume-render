@@ -1,6 +1,8 @@
 import { mat4 } from 'wgpu-matrix'
 import type { Mat4, Vec3n } from 'wgpu-matrix'
 
+const MAX_TEXTURE_UPLOAD_BYTES = 32 * 1024 * 1024
+
 export type ScalarVoxelArray =
   | Uint8Array
   | Int8Array
@@ -66,24 +68,33 @@ export function createGPUTexture(device: GPUDevice, volume: ScalarVolume): GPUTe
   const { shape, data } = volume
   const bytesPerVoxel = 4
   const bytesPerRow = alignTo(shape[0] * bytesPerVoxel, 256)
-  const padded = new Float32Array((bytesPerRow / bytesPerVoxel) * shape[1] * shape[2])
+  const rowsPerImage = shape[1]
+  const floatsPerRow = bytesPerRow / bytesPerVoxel
+  const bytesPerSlice = bytesPerRow * rowsPerImage
+  const slicesPerUpload = Math.max(1, Math.floor(MAX_TEXTURE_UPLOAD_BYTES / bytesPerSlice))
 
-  for (let z = 0; z < shape[2]; z += 1) {
-    for (let y = 0; y < shape[1]; y += 1) {
-      const sourceOffset = shape[0] * (y + shape[1] * z)
-      const targetOffset = (bytesPerRow / bytesPerVoxel) * (y + shape[1] * z)
-      for (let x = 0; x < shape[0]; x += 1) {
-        padded[targetOffset + x] = data[sourceOffset + x]
+  for (let zStart = 0; zStart < shape[2]; zStart += slicesPerUpload) {
+    const depth = Math.min(slicesPerUpload, shape[2] - zStart)
+    const padded = new Float32Array(floatsPerRow * rowsPerImage * depth)
+    for (let localZ = 0; localZ < depth; localZ += 1) {
+      const z = zStart + localZ
+      for (let y = 0; y < shape[1]; y += 1) {
+        const sourceOffset = shape[0] * (y + shape[1] * z)
+        const targetOffset = floatsPerRow * (y + rowsPerImage * localZ)
+        for (let x = 0; x < shape[0]; x += 1) {
+          padded[targetOffset + x] = data[sourceOffset + x]
+        }
       }
     }
-  }
 
-  device.queue.writeTexture(
-    { texture },
-    padded,
-    { bytesPerRow, rowsPerImage: shape[1] },
-    shape,
-  )
+    device.queue.writeTexture(
+      { texture, origin: [0, 0, zStart] },
+      padded,
+      { bytesPerRow, rowsPerImage },
+      [shape[0], shape[1], depth],
+    )
+    device.queue.submit([])
+  }
 
   return texture
 }

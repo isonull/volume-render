@@ -4,18 +4,22 @@ import { createRoot } from 'react-dom/client'
 import { CommandDispatcher } from './commands/commandDispatcher'
 import {
   CENTER_VOLUME_COMMAND,
+  FLIP_MPR_PLANE_AXIS_COMMAND,
   SET_MPR_RENDER_STATE_COMMAND,
   SET_OVERLAY_SEGMENTATION_COMMAND,
-  createMprCommands,
 } from './commands/mprCommands'
 import {
   CLOSE_SEGMENTATION_COMMAND,
   CLOSE_VOLUME_COMMAND,
   OPEN_SEGMENTATION_COMMAND,
   OPEN_VOLUME_COMMAND,
-  createSceneCommands,
 } from './commands/sceneCommands'
-import { createSegmentationCommands } from './commands/segmentationCommands'
+import { ExtensionHost } from './extensions/extensionHost'
+import { RuntimeEventBus } from './extensions/eventBus'
+import { createCoreExtension, MPR_TOOL_GROUP_ID } from './extensions/core/coreExtension'
+import { createNnInteractiveExtension } from './extensions/nninteractive/nnInteractiveExtension'
+import { InteractionModeService } from './extensions/interactionModeService'
+import { ExtensionServiceRegistry } from './extensions/serviceRegistry'
 import { MprRenderer } from './mpr/mprRenderer'
 import { createInitialMprState, valueRange } from './mpr/mprState'
 import { canvasToWorld, isVoxelInBounds, worldToIndex } from './mpr/mprMath'
@@ -24,7 +28,6 @@ import { SceneService } from './services/sceneService'
 import { SegmentationService } from './services/segmentationService'
 import { ViewportService } from './services/viewportService'
 import { InputRouter } from './tools/inputRouter'
-import { PanTool, ProbeTool, SegmentationBrushTool, StackScrollTool, WindowLevelTool, ZoomTool } from './tools/mprTools'
 import { ToolController } from './tools/toolController'
 import { ToolGroupService } from './tools/toolGroupService'
 import { ToolRegistry } from './tools/toolRegistry'
@@ -34,17 +37,21 @@ import type { Vec2n, Vec3, Vec3n } from 'wgpu-matrix'
 import type { ScalarVolume } from './volume'
 import type { MouseEvent } from 'react'
 import type { LabelmapSegmentationData } from './segmentation'
+import type {
+  ActiveToolPanel,
+  ExtensionAppApi,
+  ExtensionContext,
+  ExtensionPanelContribution,
+  ExtensionToolPanelEntry,
+  SegmentActionEntry,
+  SegmentContextItem,
+} from './extensions/types'
 
 const VIEWPORTS: { id: MprOrientation; label: string }[] = [
   { id: 'axial', label: 'Axial' },
   { id: 'coronal', label: 'Coronal' },
   { id: 'sagittal', label: 'Sagittal' },
 ]
-
-const NO_MODIFIERS = { shift: false, ctrl: false, alt: false, meta: false }
-const MPR_TOOL_GROUP_ID = 'mpr'
-
-type InteractionMode = 'navigate' | 'brush' | 'erase'
 
 type SceneBrowserItem =
   | { kind: 'volume'; id: string; label: string; shape: string; source?: string; segmentations: SceneBrowserItem[] }
@@ -79,10 +86,18 @@ function MprApp() {
   const renderServiceRef = useRef<RenderService | null>(null)
   const segmentationServiceRef = useRef<SegmentationService | null>(null)
   const toolGroupsRef = useRef<ToolGroupService | null>(null)
+  const toolRegistryRef = useRef<ToolRegistry | null>(null)
   const commandDispatcherRef = useRef<CommandDispatcher | null>(null)
   const inputRouterRef = useRef<InputRouter | null>(null)
+  const extensionHostRef = useRef<ExtensionHost | null>(null)
+  const extensionServicesRef = useRef<ExtensionServiceRegistry | null>(null)
+  const runtimeEventsRef = useRef<RuntimeEventBus | null>(null)
+  const interactionModesRef = useRef<InteractionModeService | null>(null)
   const activeVolumeRef = useRef<ScalarVolume | null>(null)
   const activeSegmentationIdRef = useRef<string | null>(null)
+  const activeToolPanelRef = useRef<ActiveToolPanel>(null)
+  const interactionModeRef = useRef('core.navigate')
+  const wheelListenerCleanupRef = useRef(new Map<MprOrientation, () => void>())
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const segmentationInputRef = useRef<HTMLInputElement | null>(null)
   const segmentationTargetVolumeIdRef = useRef<string | null>(null)
@@ -95,9 +110,9 @@ function MprApp() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [probeInfo, setProbeInfo] = useState<ProbeInfo | null>(null)
   const [brushPreview, setBrushPreview] = useState<BrushPreviewInfo | null>(null)
-  const [interactionMode, setInteractionMode] = useState<InteractionMode>('navigate')
-  const [brushRadiusMm, setBrushRadiusMmState] = useState(3)
-  const [activeSegmentLabel, setActiveSegmentLabelState] = useState(1)
+  const [, setInteractionModeState] = useState('core.navigate')
+  const [, setActiveToolPanelState] = useState<ActiveToolPanel>(null)
+  const [extensionUiVersion, setExtensionUiVersion] = useState(0)
 
   const setWindowMin = useCallback((value: string) => {
     windowMinRef.current = value
@@ -108,8 +123,26 @@ function MprApp() {
   }, [])
 
   const setCanvasRef = useCallback((id: MprOrientation) => (canvas: HTMLCanvasElement | null) => {
+    wheelListenerCleanupRef.current.get(id)?.()
+    wheelListenerCleanupRef.current.delete(id)
     if (canvas) {
       canvasRefs.current.set(id, canvas)
+      const handleWheel = (event: WheelEvent) => {
+        if (!activeVolumeRef.current) {
+          if (event.ctrlKey) {
+            event.preventDefault()
+          }
+          return
+        }
+        keyboardViewportIdRef.current = id
+        event.preventDefault()
+        event.stopPropagation()
+        inputRouterRef.current?.handleWheel(event, id)
+      }
+      canvas.addEventListener('wheel', handleWheel, { passive: false })
+      wheelListenerCleanupRef.current.set(id, () => {
+        canvas.removeEventListener('wheel', handleWheel)
+      })
     } else {
       canvasRefs.current.delete(id)
     }
@@ -119,34 +152,24 @@ function MprApp() {
     return viewportServiceRef.current?.renderStates.get(viewportId) ?? null
   }, [])
 
-  const setToolInteractionMode = useCallback((mode: InteractionMode) => {
-    const segmentationService = segmentationServiceRef.current
-    const toolGroups = toolGroupsRef.current
-    if (mode !== 'navigate' && !segmentationService?.getActiveSegmentationId()) {
-      setStatus('Open a segmentation before using brush tools.')
-      return
-    }
-    setInteractionMode(mode)
+  const setInteractionMode = useCallback((modeId: string) => {
+    interactionModeRef.current = modeId
+    setInteractionModeState(modeId)
     setBrushPreview(null)
-    if (mode === 'navigate') {
-      toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'mpr.pan', 'active')
-      toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'seg.brush', 'disabled')
-      return
-    }
-    segmentationService?.setBrushMode(mode === 'erase' ? 'erase' : 'paint')
-    toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'mpr.pan', 'disabled')
-    toolGroups?.setToolMode(MPR_TOOL_GROUP_ID, 'seg.brush', 'active')
-  }, [])
-
-  const setBrushRadiusMm = useCallback((radiusMm: number) => {
-    const next = Math.max(0.25, Number(radiusMm.toFixed(2)))
-    segmentationServiceRef.current?.setBrushRadiusMm(next)
-    setBrushRadiusMmState(next)
+    runtimeEventsRef.current?.emit('interactionMode.changed', { modeId })
   }, [])
 
   const setActiveSegmentLabel = useCallback((label: number) => {
     segmentationServiceRef.current?.setActiveSegmentLabel(label)
-    setActiveSegmentLabelState(label)
+    setExtensionUiVersion(version => version + 1)
+  }, [])
+
+  const activateInteractionMode = useCallback((modeId: string) => {
+    const reason = interactionModesRef.current?.activate(modeId) ?? null
+    if (reason) {
+      setStatus(reason)
+    }
+    setExtensionUiVersion(version => version + 1)
   }, [])
 
   const resetView = useCallback((viewportId: MprOrientation) => {
@@ -178,6 +201,15 @@ function MprApp() {
     commands.execute(SET_MPR_RENDER_STATE_COMMAND, { viewportId, state })
   }, [])
 
+  const flipPlaneAxis = useCallback((viewportId: MprOrientation, axis: 'right' | 'up') => {
+    const commands = commandDispatcherRef.current
+    if (!commands) {
+      return
+    }
+    keyboardViewportIdRef.current = viewportId
+    commands.execute(FLIP_MPR_PLANE_AXIS_COMMAND, { viewportId, axis })
+  }, [])
+
   const centerVolume = useCallback((volumeId: string) => {
     const sceneService = sceneServiceRef.current
     const commands = commandDispatcherRef.current
@@ -199,22 +231,6 @@ function MprApp() {
     })
     setStatus(`Centered ${volume.source?.uri ?? volume.id}.`)
   }, [setWindowMax, setWindowMin])
-
-  const centerSceneItem = useCallback((item: ContextMenuState['item']) => {
-    const scene = sceneServiceRef.current?.scene
-    if (!scene) {
-      return
-    }
-    if (item.kind === 'volume') {
-      centerVolume(item.id)
-      return
-    }
-    const segmentation = scene.segmentations.get(item.id)
-    if (segmentation) {
-      activeSegmentationIdRef.current = segmentation.id
-      centerVolume(segmentation.sourceVolumeId)
-    }
-  }, [centerVolume])
 
   const openSegmentationForVolume = useCallback((volumeId: string) => {
     if (!sceneServiceRef.current?.scene?.volumes.has(volumeId)) {
@@ -242,7 +258,7 @@ function MprApp() {
       }>(CLOSE_VOLUME_COMMAND, { volumeId: item.id })
       if (activeSegmentationIdRef.current && result.removedSegmentationIds.includes(activeSegmentationIdRef.current)) {
         activeSegmentationIdRef.current = null
-        setToolInteractionMode('navigate')
+        activateInteractionMode('core.navigate')
       }
       if (result.nextVolume) {
         centerVolume(result.nextVolume.id)
@@ -251,20 +267,20 @@ function MprApp() {
         activeSegmentationIdRef.current = null
         setProbeInfo(null)
         setBrushPreview(null)
-        setToolInteractionMode('navigate')
+        activateInteractionMode('core.navigate')
       }
       setStatus(`Volume ${result.volume.source?.uri ?? result.volume.id} closed.`)
     } else {
       commands.execute(CLOSE_SEGMENTATION_COMMAND, { segmentationId: item.id })
       if (activeSegmentationIdRef.current === item.id) {
         activeSegmentationIdRef.current = null
-        setToolInteractionMode('navigate')
+        activateInteractionMode('core.navigate')
         commands.execute(SET_OVERLAY_SEGMENTATION_COMMAND, { visible: false })
       }
       setStatus('Segmentation closed.')
     }
     setSceneBrowserVersion(version => version + 1)
-  }, [centerVolume, setToolInteractionMode])
+  }, [activateInteractionMode, centerVolume])
 
   const getWorldPoint = useCallback((viewportId: string, clientPoint: Vec2n): Vec3 | null => {
     const typedViewportId = viewportId as MprOrientation
@@ -359,8 +375,10 @@ function MprApp() {
       activeSegmentationIdRef.current = null
       setProbeInfo(null)
       setBrushPreview(null)
-      setToolInteractionMode('navigate')
+      activateInteractionMode('core.navigate')
       commands.execute(OPEN_VOLUME_COMMAND, { volume })
+      runtimeEventsRef.current?.emit('activeVolume.changed', { volume })
+      runtimeEventsRef.current?.emit('activeSegmentation.changed', { segmentation: null })
       setSceneBrowserVersion(version => version + 1)
       const [min, max] = valueRange(volume)
       const range = max - min
@@ -373,7 +391,7 @@ function MprApp() {
     } catch (error) {
       setStatus(errorMessage(error))
     }
-  }, [resetView, setToolInteractionMode, setWindowMax, setWindowMin])
+  }, [activateInteractionMode, resetView, setWindowMax, setWindowMin])
 
   const loadSegmentationFile = useCallback(async (file: File | undefined, sourceVolumeId?: string | null) => {
     const sceneService = sceneServiceRef.current
@@ -399,6 +417,7 @@ function MprApp() {
       activeSegmentationIdRef.current = segmentation.id
       activeVolumeRef.current = activeVolume
       setActiveSegmentLabel(firstEditableLabel(segmentation))
+      runtimeEventsRef.current?.emit('activeSegmentation.changed', { segmentation })
       commands.execute(SET_OVERLAY_SEGMENTATION_COMMAND, {
         segmentationId: segmentation.id,
         sourceVolumeId: activeVolume.id,
@@ -416,37 +435,153 @@ function MprApp() {
     let sceneService: SceneService | null = null
     let viewportService: ViewportService | null = null
     let renderService: RenderService | null = null
-    let segmentationService: SegmentationService | null = null
+    const runtimeDisposables: { dispose(): void }[] = []
 
     async function boot(): Promise<void> {
       try {
         renderer = await MprRenderer.create()
+        renderer.onError(message => {
+          setStatus(`WebGPU error: ${message}`)
+        })
         if (cancelled) {
           renderer.destroy()
           return
         }
-        sceneService = new SceneService()
-        viewportService = new ViewportService(renderer.device, renderer.format)
-        renderService = new RenderService(renderer, sceneService, viewportService)
-        segmentationService = new SegmentationService(sceneService)
-        sceneServiceRef.current = sceneService
-        viewportServiceRef.current = viewportService
-        renderServiceRef.current = renderService
-        segmentationServiceRef.current = segmentationService
-        segmentationService.setBrushRadiusMm(3)
-        const commandDispatcher = new CommandDispatcher({
-          sceneService,
-          viewportService,
-          renderService,
-          segmentationService,
-        })
-        for (const command of [...createSceneCommands(), ...createMprCommands(), ...createSegmentationCommands()]) {
-          commandDispatcher.register(command)
-        }
-        commandDispatcherRef.current = commandDispatcher
-        const toolRegistry = createToolRegistry()
-        const toolGroups = createDefaultToolGroups(toolRegistry)
+        const createdSceneService = new SceneService()
+        const createdViewportService = new ViewportService(renderer.device, renderer.format)
+        const createdRenderService = new RenderService(renderer, createdSceneService, createdViewportService)
+        const createdSegmentationService = new SegmentationService(createdSceneService)
+        sceneService = createdSceneService
+        viewportService = createdViewportService
+        renderService = createdRenderService
+        const extensionServices = new ExtensionServiceRegistry()
+        const runtimeEvents = new RuntimeEventBus()
+        const interactionModes = new InteractionModeService()
+        const toolRegistry = new ToolRegistry()
+        const toolGroups = new ToolGroupService(toolRegistry)
+        const extensionHost = new ExtensionHost()
+
+        sceneServiceRef.current = createdSceneService
+        viewportServiceRef.current = createdViewportService
+        renderServiceRef.current = createdRenderService
+        segmentationServiceRef.current = createdSegmentationService
+        extensionServicesRef.current = extensionServices
+        runtimeEventsRef.current = runtimeEvents
+        interactionModesRef.current = interactionModes
+        toolRegistryRef.current = toolRegistry
         toolGroupsRef.current = toolGroups
+        extensionHostRef.current = extensionHost
+        createdSegmentationService.setBrushRadiusMm(3)
+        const commandDispatcher = new CommandDispatcher({
+          sceneService: createdSceneService,
+          viewportService: createdViewportService,
+          renderService: createdRenderService,
+          segmentationService: createdSegmentationService,
+          extensions: extensionServices,
+          events: runtimeEvents,
+        })
+        commandDispatcherRef.current = commandDispatcher
+
+        const invalidateUi = () => {
+          setSceneBrowserVersion(version => version + 1)
+          setExtensionUiVersion(version => version + 1)
+        }
+        const appApi: ExtensionAppApi = {
+          getActiveVolume: () => activeVolumeRef.current,
+          setActiveVolume: volume => {
+            activeVolumeRef.current = volume
+            runtimeEvents.emit('activeVolume.changed', { volume })
+            invalidateUi()
+          },
+          getActiveSegmentation: () => {
+            const segmentationId = activeSegmentationIdRef.current
+            return segmentationId ? createdSceneService.scene?.segmentations.get(segmentationId) ?? null : null
+          },
+          getActiveSegmentationId: () => activeSegmentationIdRef.current,
+          setActiveSegmentationId: segmentationId => {
+            const segmentation = segmentationId
+              ? createdSceneService.scene?.segmentations.get(segmentationId) ?? null
+              : null
+            createdSegmentationService.setActiveSegmentation(segmentation?.id ?? null)
+            activeSegmentationIdRef.current = segmentation?.id ?? null
+            runtimeEvents.emit('activeSegmentation.changed', { segmentation })
+            invalidateUi()
+          },
+          getActiveToolPanel: () => activeToolPanelRef.current,
+          setActiveToolPanel: panel => {
+            activeToolPanelRef.current = panel
+            setActiveToolPanelState(panel)
+            invalidateUi()
+          },
+          getInteractionMode: () => interactionModeRef.current,
+          setInteractionMode,
+          setStatus,
+          invalidateUi,
+          centerVolume,
+          openSegmentationForVolume,
+          closeSceneItem,
+        }
+
+        runtimeDisposables.push(
+          runtimeEvents.on('scene.changed', invalidateUi),
+          runtimeEvents.on('activeSegmentation.changed', ({ segmentation }) => {
+            activeSegmentationIdRef.current = segmentation?.id ?? null
+            if (
+              activeToolPanelRef.current &&
+              activeToolPanelRef.current.segmentationId !== segmentation?.id
+            ) {
+              activeToolPanelRef.current = null
+              setActiveToolPanelState(null)
+            }
+            invalidateUi()
+          }),
+          runtimeEvents.on('activeVolume.changed', ({ volume }) => {
+            activeVolumeRef.current = volume
+            invalidateUi()
+          }),
+          runtimeEvents.on('volume.removed', ({ volumeId }) => {
+            if (activeVolumeRef.current?.id === volumeId) {
+              activeVolumeRef.current = null
+            }
+            invalidateUi()
+          }),
+          runtimeEvents.on('segmentation.removed', ({ segmentationId }) => {
+            if (activeSegmentationIdRef.current === segmentationId) {
+              activeSegmentationIdRef.current = null
+            }
+            if (activeToolPanelRef.current?.segmentationId === segmentationId) {
+              activeToolPanelRef.current = null
+              setActiveToolPanelState(null)
+            }
+            invalidateUi()
+          }),
+        )
+
+        const makeContext = (extensionId: string): ExtensionContext => ({
+          extensionId,
+          core: {
+            sceneService: createdSceneService,
+            viewportService: createdViewportService,
+            renderService: createdRenderService,
+            segmentationService: createdSegmentationService,
+          },
+          commands: commandDispatcher,
+          toolRegistry,
+          toolGroups,
+          services: extensionServices,
+          events: runtimeEvents,
+          interactionModes,
+          app: appApi,
+        })
+
+        const extensions = [
+          createCoreExtension(),
+          createNnInteractiveExtension(),
+        ]
+        for (const extension of extensions) {
+          await extensionHost.activate(extension, makeContext(extension.id))
+        }
+
         inputRouterRef.current = new InputRouter(new ToolController({
           commands: commandDispatcher,
           getActiveVolume: () => activeVolumeRef.current,
@@ -478,9 +613,10 @@ function MprApp() {
           if (!canvas) {
             throw new Error(`Missing ${viewport.label} canvas.`)
           }
-          viewportService.createViewport(canvas, viewport.id)
-          toolGroups.addViewport('mpr', viewport.id)
+          createdViewportService.createViewport(canvas, viewport.id)
+          toolGroups.addViewport(MPR_TOOL_GROUP_ID, viewport.id)
         }
+        interactionModes.activate('core.navigate')
         setStatus('WebGPU ready. Load a NIfTI scalar volume.')
       } catch (error) {
         setStatus(errorMessage(error))
@@ -496,14 +632,39 @@ function MprApp() {
       sceneServiceRef.current = null
       segmentationServiceRef.current = null
       toolGroupsRef.current = null
+      toolRegistryRef.current = null
       commandDispatcherRef.current = null
       inputRouterRef.current = null
+      for (const cleanup of wheelListenerCleanupRef.current.values()) {
+        cleanup()
+      }
+      wheelListenerCleanupRef.current.clear()
+      runtimeEventsRef.current?.emit('app.dispose', undefined)
+      extensionHostRef.current?.dispose()
+      for (const disposable of runtimeDisposables.reverse()) {
+        disposable.dispose()
+      }
+      extensionHostRef.current = null
+      extensionServicesRef.current = null
+      runtimeEventsRef.current = null
+      interactionModesRef.current = null
       renderService?.destroy()
       viewportService?.destroy()
       sceneService?.destroyScene()
       renderer?.destroy()
     }
-  }, [getBrushPreviewRadiusPx, getWorldPoint, setWindowMax, setWindowMin, updateBrushPreview, updateProbeInfo])
+  }, [
+    centerVolume,
+    closeSceneItem,
+    getBrushPreviewRadiusPx,
+    getWorldPoint,
+    openSegmentationForVolume,
+    setInteractionMode,
+    setWindowMax,
+    setWindowMin,
+    updateBrushPreview,
+    updateProbeInfo,
+  ])
 
   useEffect(() => {
     function handleResize(): void {
@@ -564,60 +725,80 @@ function MprApp() {
   }, [contextMenu])
 
   const scene = sceneServiceRef.current?.scene ?? null
-  const activeSegmentation = activeSegmentationIdRef.current
-    ? scene?.segmentations.get(activeSegmentationIdRef.current) ?? null
-    : null
-  const editableLabels = activeSegmentation ? segmentLabelOptions(activeSegmentation, activeSegmentLabel) : []
   const sceneItems = createSceneBrowserItems(scene, sceneBrowserVersion)
+  const panelEntries = extensionHostRef.current?.panelEntries ?? []
+  const toolPanelEntries = extensionHostRef.current?.toolPanelEntries ?? []
+  const segmentActionsFor = (item: SegmentContextItem): SegmentActionEntry[] => {
+    return extensionHostRef.current?.segmentActionsFor(item) ?? []
+  }
 
   return (
     <main className="mpr-shell">
       <section className="mpr-grid" aria-label="Three direction MPR viewports">
-        {VIEWPORTS.map(viewport => (
-          <section className="mpr-viewport" data-viewport={viewport.id} key={viewport.id}>
-            <canvas
-              ref={setCanvasRef(viewport.id)}
-              aria-label={`${viewport.label} MPR viewport`}
-              onContextMenu={event => event.preventDefault()}
-              onDoubleClick={() => resetView(viewport.id)}
-              onPointerCancel={event => {
-                keyboardViewportIdRef.current = viewport.id
-                inputRouterRef.current?.handlePointerCancel(event.nativeEvent, viewport.id)
-              }}
-              onPointerDown={event => {
-                if (!activeVolumeRef.current) {
-                  return
-                }
-                keyboardViewportIdRef.current = viewport.id
-                event.currentTarget.setPointerCapture(event.pointerId)
-                inputRouterRef.current?.handlePointerDown(event.nativeEvent, viewport.id)
-              }}
-              onPointerMove={event => {
-                keyboardViewportIdRef.current = viewport.id
-                inputRouterRef.current?.handlePointerMove(event.nativeEvent, viewport.id)
-              }}
-              onPointerUp={event => {
-                keyboardViewportIdRef.current = viewport.id
-                inputRouterRef.current?.handlePointerUp(event.nativeEvent, viewport.id)
-              }}
-              onPointerLeave={() => {
-                inputRouterRef.current?.clearHover()
-                setBrushPreview(null)
-              }}
-              onWheel={event => {
-                if (!activeVolumeRef.current) {
-                  return
-                }
-                keyboardViewportIdRef.current = viewport.id
-                event.preventDefault()
-                inputRouterRef.current?.handleWheel(event.nativeEvent, viewport.id)
-              }}
-            />
-            <div className="viewport-label">{viewport.label}</div>
-            {brushPreview?.viewportId === viewport.id ? <BrushPreviewOverlay brushPreview={brushPreview} /> : null}
-            {probeInfo?.viewportId === viewport.id ? <ProbeOverlay probeInfo={probeInfo} /> : null}
-          </section>
-        ))}
+        {VIEWPORTS.map(viewport => {
+          const hasRenderState = currentState(viewport.id) !== null
+          return (
+            <section className="mpr-viewport" data-viewport={viewport.id} key={viewport.id}>
+              <canvas
+                ref={setCanvasRef(viewport.id)}
+                aria-label={`${viewport.label} MPR viewport`}
+                onContextMenu={event => event.preventDefault()}
+                onDoubleClick={() => resetView(viewport.id)}
+                onPointerCancel={event => {
+                  keyboardViewportIdRef.current = viewport.id
+                  inputRouterRef.current?.handlePointerCancel(event.nativeEvent, viewport.id)
+                }}
+                onPointerDown={event => {
+                  if (!activeVolumeRef.current) {
+                    return
+                  }
+                  keyboardViewportIdRef.current = viewport.id
+                  event.currentTarget.setPointerCapture(event.pointerId)
+                  inputRouterRef.current?.handlePointerDown(event.nativeEvent, viewport.id)
+                }}
+                onPointerMove={event => {
+                  keyboardViewportIdRef.current = viewport.id
+                  inputRouterRef.current?.handlePointerMove(event.nativeEvent, viewport.id)
+                }}
+                onPointerUp={event => {
+                  keyboardViewportIdRef.current = viewport.id
+                  inputRouterRef.current?.handlePointerUp(event.nativeEvent, viewport.id)
+                }}
+                onPointerLeave={() => {
+                  inputRouterRef.current?.clearHover()
+                  setBrushPreview(null)
+                }}
+              />
+              <div className="viewport-toolbar" aria-label={`${viewport.label} viewport tools`}>
+                <div className="viewport-label">{viewport.label}</div>
+                <div className="viewport-actions">
+                  <button
+                    type="button"
+                    className="viewport-tool-button"
+                    title={`Flip ${viewport.label} horizontal`}
+                    aria-label={`Flip ${viewport.label} horizontal`}
+                    disabled={!hasRenderState}
+                    onClick={() => flipPlaneAxis(viewport.id, 'right')}
+                  >
+                    <span aria-hidden="true">↔</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="viewport-tool-button"
+                    title={`Flip ${viewport.label} vertical`}
+                    aria-label={`Flip ${viewport.label} vertical`}
+                    disabled={!hasRenderState}
+                    onClick={() => flipPlaneAxis(viewport.id, 'up')}
+                  >
+                    <span aria-hidden="true">↕</span>
+                  </button>
+                </div>
+              </div>
+              {brushPreview?.viewportId === viewport.id ? <BrushPreviewOverlay brushPreview={brushPreview} /> : null}
+              {probeInfo?.viewportId === viewport.id ? <ProbeOverlay probeInfo={probeInfo} /> : null}
+            </section>
+          )
+        })}
         <section className="mpr-empty" aria-label="Empty viewport slot" />
       </section>
       <aside className="controls">
@@ -658,53 +839,16 @@ function MprApp() {
             }}
           />
         </div>
-        {activeSegmentation ? (
-          <section className="segmentation-tools" aria-label="Segmentation tools">
-            <h2>Segmentation</h2>
-            <div className="segmented-control" role="group" aria-label="Interaction mode">
-              <button
-                type="button"
-                className={interactionMode === 'navigate' ? 'active' : ''}
-                onClick={() => setToolInteractionMode('navigate')}
-              >
-                Navigate
-              </button>
-              <button
-                type="button"
-                className={interactionMode === 'brush' ? 'active' : ''}
-                onClick={() => setToolInteractionMode('brush')}
-              >
-                Brush
-              </button>
-              <button
-                type="button"
-                className={interactionMode === 'erase' ? 'active' : ''}
-                onClick={() => setToolInteractionMode('erase')}
-              >
-                Erase
-              </button>
-            </div>
-            <label className="tool-field">
-              Label
-              <select
-                value={activeSegmentLabel}
-                onChange={event => setActiveSegmentLabel(Number(event.currentTarget.value))}
-              >
-                {editableLabels.map(label => (
-                  <option key={label} value={label}>{label}</option>
-                ))}
-              </select>
-            </label>
-            <div className="tool-field">
-              <span>Radius</span>
-              <div className="stepper">
-                <button type="button" onClick={() => setBrushRadiusMm(brushRadiusMm - 0.5)}>-</button>
-                <output>{`${brushRadiusMm.toFixed(1)} mm`}</output>
-                <button type="button" onClick={() => setBrushRadiusMm(brushRadiusMm + 0.5)}>+</button>
-              </div>
-            </div>
-          </section>
-        ) : null}
+        {panelEntries.map(({ panel, context }) => (
+          <ExtensionPanel
+            context={context}
+            key={`${context.extensionId}:${panel.id}`}
+            panel={panel}
+            segmentActionsFor={segmentActionsFor}
+            toolPanels={toolPanelEntries}
+            uiVersion={extensionUiVersion}
+          />
+        ))}
         <section className="scene-browser" aria-label="Scene browser">
           <h2>Scene</h2>
           {sceneItems.length === 0 ? (
@@ -734,35 +878,18 @@ function MprApp() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={event => event.stopPropagation()}
           >
-            <button
-              type="button"
-              onClick={() => {
-                centerSceneItem(contextMenu.item)
-                setContextMenu(null)
-              }}
-            >
-              Center
-            </button>
-            {contextMenu.item.kind === 'volume' ? (
+            {(extensionHostRef.current?.sceneActionsFor(contextMenu.item) ?? []).map(({ action, context }) => (
               <button
+                key={`${context.extensionId}:${action.id}`}
                 type="button"
                 onClick={() => {
-                  openSegmentationForVolume(contextMenu.item.id)
+                  void action.run(contextMenu.item, { extension: context })
                   setContextMenu(null)
                 }}
               >
-                Open Segmentation
+                {action.label}
               </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => {
-                closeSceneItem(contextMenu.item)
-                setContextMenu(null)
-              }}
-            >
-              Close
-            </button>
+            ))}
           </div>
         ) : null}
       </aside>
@@ -814,6 +941,22 @@ function SceneBrowserNode({
   )
 }
 
+function ExtensionPanel({
+  context,
+  panel,
+  segmentActionsFor,
+  toolPanels,
+  uiVersion,
+}: {
+  context: ExtensionContext
+  panel: ExtensionPanelContribution
+  segmentActionsFor: (item: SegmentContextItem) => SegmentActionEntry[]
+  toolPanels: ExtensionToolPanelEntry[]
+  uiVersion: number
+}) {
+  return <>{panel.render({ uiVersion, extension: context, segmentActionsFor, toolPanels })}</>
+}
+
 function ProbeOverlay({ probeInfo }: { probeInfo: ProbeInfo }) {
   return (
     <dl className="probe-overlay">
@@ -856,16 +999,6 @@ function BrushPreviewOverlay({ brushPreview }: { brushPreview: BrushPreviewInfo 
 function firstEditableLabel(segmentation: LabelmapSegmentationData): number {
   const labels = [...segmentation.segments.keys()].filter(label => label > 0).sort((a, b) => a - b)
   return labels[0] ?? 1
-}
-
-function segmentLabelOptions(segmentation: LabelmapSegmentationData, activeLabel: number): number[] {
-  const labels = new Set<number>([activeLabel])
-  for (const label of segmentation.segments.keys()) {
-    if (label > 0) {
-      labels.add(label)
-    }
-  }
-  return [...labels].sort((a, b) => a - b)
 }
 
 function createSceneBrowserItems(scene: Scene | null, _version: number): SceneBrowserItem[] {
@@ -922,53 +1055,6 @@ function formatIntensity(value: number): string {
 function readVolumeVoxel(volume: ScalarVolume, voxel: Vec3n): number {
   const [x, y, z] = voxel
   return volume.data[x + volume.shape[0] * (y + volume.shape[1] * z)]
-}
-
-function createToolRegistry(): ToolRegistry {
-  const registry = new ToolRegistry()
-  registry.register({ id: 'mpr.pan', create: () => new PanTool() })
-  registry.register({ id: 'mpr.windowLevel', create: () => new WindowLevelTool() })
-  registry.register({ id: 'mpr.stackScroll', create: () => new StackScrollTool() })
-  registry.register({ id: 'mpr.zoom', create: () => new ZoomTool() })
-  registry.register({ id: 'mpr.probe', create: () => new ProbeTool() })
-  registry.register({ id: 'seg.brush', create: () => new SegmentationBrushTool() })
-  return registry
-}
-
-function createDefaultToolGroups(registry: ToolRegistry): ToolGroupService {
-  const toolGroups = new ToolGroupService(registry)
-  toolGroups.createToolGroup(MPR_TOOL_GROUP_ID)
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.pan', {
-    mode: 'active',
-    bindings: [{ kind: 'drag', button: 0, modifiers: NO_MODIFIERS }],
-  })
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.windowLevel', {
-    mode: 'active',
-    bindings: [
-      { kind: 'drag', button: 0, modifiers: { ...NO_MODIFIERS, shift: true } },
-      { kind: 'drag', button: 2, modifiers: NO_MODIFIERS },
-    ],
-  })
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.stackScroll', {
-    mode: 'active',
-    bindings: [{ kind: 'wheel', modifiers: NO_MODIFIERS }],
-  })
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.zoom', {
-    mode: 'active',
-    bindings: [{ kind: 'wheel', modifiers: { ...NO_MODIFIERS, ctrl: true } }],
-  })
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'mpr.probe', {
-    mode: 'passive',
-    bindings: [{ kind: 'hover' }],
-  })
-  toolGroups.addTool(MPR_TOOL_GROUP_ID, 'seg.brush', {
-    mode: 'disabled',
-    bindings: [
-      { kind: 'drag', button: 0, modifiers: NO_MODIFIERS },
-      { kind: 'hover' },
-    ],
-  })
-  return toolGroups
 }
 
 function errorMessage(error: unknown): string {

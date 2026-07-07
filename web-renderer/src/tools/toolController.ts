@@ -1,5 +1,5 @@
 import type { Vec2n } from 'wgpu-matrix'
-import type { DragTool, ToolContext } from './tool'
+import type { DragTool, PointTool, ToolContext } from './tool'
 import type { ToolInputEvent } from './toolInput'
 import type { ToolGroupService } from './toolGroupService'
 
@@ -9,8 +9,15 @@ type ActiveDrag = {
   tool: DragTool
 }
 
+type PendingPoint = {
+  viewportId: string
+  start: Vec2n
+  tool: PointTool
+}
+
 export class ToolController {
   private activeDrag: ActiveDrag | null = null
+  private pendingPoint: PendingPoint | null = null
   private readonly context: ToolContext
   private readonly toolGroups: ToolGroupService
 
@@ -21,6 +28,15 @@ export class ToolController {
 
   handleInput(event: ToolInputEvent): void {
     if (event.type === 'pointerDown') {
+      const pointTool = this.toolGroups.findPointTool(event.viewportId, event)
+      if (pointTool) {
+        this.pendingPoint = {
+          viewportId: event.viewportId,
+          start: event.clientPoint,
+          tool: pointTool,
+        }
+        return
+      }
       const tool = this.toolGroups.findDragTool(event.viewportId, event)
       if (!tool) {
         return
@@ -43,12 +59,22 @@ export class ToolController {
         this.activeDrag.previous = event.clientPoint
         this.activeDrag.tool.onDrag(delta, event, this.context)
       } else {
+        if (this.pendingPoint && pointDistance(this.pendingPoint.start, event.clientPoint) > 4) {
+          this.pendingPoint = null
+        }
         this.toolGroups.findHoverTool(event.viewportId)?.onMove(event, this.context)
       }
       return
     }
 
     if (event.type === 'pointerUp') {
+      if (this.pendingPoint && this.pendingPoint.viewportId === event.viewportId) {
+        const pointEvent = { ...event, type: 'point' as const }
+        const tool = this.pendingPoint.tool
+        this.pendingPoint = null
+        tool.onPoint(pointEvent, this.context)
+        return
+      }
       this.finishDrag(event, 'end')
       return
     }
@@ -79,6 +105,7 @@ export class ToolController {
 
   cancelDrag(): void {
     this.activeDrag = null
+    this.pendingPoint = null
   }
 
   private finishDrag(event: ToolInputEvent, reason: 'end' | 'cancel'): void {
@@ -92,4 +119,8 @@ export class ToolController {
       this.activeDrag = null
     }
   }
+}
+
+function pointDistance(a: Vec2n, b: Vec2n): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1])
 }

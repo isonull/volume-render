@@ -114,6 +114,51 @@ canvas {
   font-weight: 650;
 }
 
+.viewport-toolbar {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  max-width: calc(100% - 24px);
+  gap: 6px;
+}
+
+.viewport-toolbar .viewport-label {
+  position: static;
+}
+
+.viewport-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewport-tool-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(166, 177, 194, 0.24);
+  border-radius: 6px;
+  background: rgba(11, 13, 16, 0.72);
+  padding: 0;
+  color: #dce4ef;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.viewport-tool-button:not(:disabled):hover {
+  border-color: rgba(128, 188, 255, 0.72);
+  background: rgba(27, 42, 60, 0.82);
+}
+
+.viewport-tool-button:focus-visible {
+  outline: 2px solid #80bcff;
+  outline-offset: 2px;
+}
+
 .probe-overlay {
   position: absolute;
   left: 12px;
@@ -240,7 +285,8 @@ input[type="file"] {
   padding: 8px;
 }
 
-.segmentation-tools {
+.segmentation-tools,
+.extension-panel {
   display: grid;
   gap: 12px;
   margin-top: 18px;
@@ -248,12 +294,95 @@ input[type="file"] {
   border-top: 1px solid #26303d;
 }
 
-.segmentation-tools h2 {
+.segmentation-tools h2,
+.extension-panel h2 {
   margin: 0;
   color: #f0f4fa;
   font-size: 14px;
   font-weight: 650;
   letter-spacing: 0;
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.add-segment-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.segment-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.segment-empty {
+  border: 1px dashed #303a49;
+  border-radius: 6px;
+  padding: 10px;
+  color: #8f9bad;
+  font-size: 12px;
+}
+
+.segment-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-height: 42px;
+  gap: 10px;
+  border: 1px solid #303a49;
+  border-radius: 6px;
+  background: #0c1016;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.segment-row.active {
+  border-color: rgba(128, 188, 255, 0.72);
+  background: #142234;
+}
+
+.segment-color {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 999px;
+}
+
+.segment-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.segment-main span,
+.segment-main small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segment-main small {
+  color: #8f9bad;
 }
 
 .segmented-control {
@@ -272,6 +401,55 @@ input[type="file"] {
 
 .segmented-control button.active {
   background: #315071;
+}
+
+.nninteractive-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.brush-tool-panel .segmented-control {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.extension-status {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.extension-status div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.nninteractive-panel .extension-status div {
+  grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.extension-status dt {
+  color: #8f9bad;
+}
+
+.extension-status dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extension-message {
+  color: #9ba8ba;
+  font-size: 12px;
 }
 
 .tool-field {

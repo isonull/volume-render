@@ -1,6 +1,14 @@
 import type { Vec2n } from 'wgpu-matrix'
 
-export type ToolInputType = 'pointerDown' | 'pointerMove' | 'pointerUp' | 'pointerCancel' | 'wheel' | 'keyDown' | 'keyUp'
+export type ToolInputType =
+  | 'pointerDown'
+  | 'pointerMove'
+  | 'pointerUp'
+  | 'pointerCancel'
+  | 'wheel'
+  | 'keyDown'
+  | 'keyUp'
+  | 'point'
 
 export interface KeyModifiers {
   shift: boolean

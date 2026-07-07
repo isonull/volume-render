@@ -30,4 +30,8 @@ export class ToolRegistry {
   has(toolId: string): boolean {
     return this.registrations.has(toolId)
   }
+
+  unregister(toolId: string): void {
+    this.registrations.delete(toolId)
+  }
 }

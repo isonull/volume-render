@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nninteractive-proxy"
+version = "0.1.0"
+description = "Raw-array proxy sidecar for nnInteractive server integration."
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26,<3",
+  "blosc2>=2.6,<4",
+]
+
+[project.scripts]
+nninteractive-proxy = "nninteractive_proxy:main"
+
+[tool.setuptools]
+py-modules = ["nninteractive_proxy"]
+

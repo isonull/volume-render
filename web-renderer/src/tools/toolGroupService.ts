@@ -1,5 +1,5 @@
 import type { ToolInputEvent } from './toolInput'
-import type { DragTool, HoverTool, KeyTool, Tool, ToolBinding, ToolMode, WheelTool } from './tool'
+import type { DragTool, HoverTool, KeyTool, PointTool, Tool, ToolBinding, ToolMode, WheelTool } from './tool'
 import type { ToolRegistry } from './toolRegistry'
 
 export interface ToolGroupToolState {
@@ -36,6 +36,23 @@ export class ToolGroupService {
     return group
   }
 
+  hasToolGroup(groupId: string): boolean {
+    return this.groups.has(groupId)
+  }
+
+  removeToolGroup(groupId: string): void {
+    const group = this.groups.get(groupId)
+    if (!group) {
+      return
+    }
+    for (const viewportId of group.viewportIds) {
+      if (this.viewportToGroupId.get(viewportId) === groupId) {
+        this.viewportToGroupId.delete(viewportId)
+      }
+    }
+    this.groups.delete(groupId)
+  }
+
   addViewport(groupId: string, viewportId: string): void {
     const group = this.requireGroup(groupId)
     const existingGroupId = this.viewportToGroupId.get(viewportId)
@@ -69,8 +86,32 @@ export class ToolGroupService {
     this.requireToolState(groupId, toolId).mode = mode
   }
 
+  setToolModeIfPresent(groupId: string, toolId: string, mode: ToolMode): void {
+    const state = this.requireGroup(groupId).tools.get(toolId)
+    if (state) {
+      state.mode = mode
+    }
+  }
+
+  setToolModeByBindingKind(groupId: string, kind: ToolBinding['kind'], mode: ToolMode): void {
+    const group = this.requireGroup(groupId)
+    for (const state of group.tools.values()) {
+      if (state.bindings.some(binding => binding.kind === kind)) {
+        state.mode = mode
+      }
+    }
+  }
+
   setToolBindings(groupId: string, toolId: string, bindings: ToolBinding[]): void {
     this.requireToolState(groupId, toolId).bindings = bindings
+  }
+
+  removeTool(groupId: string, toolId: string): void {
+    this.requireGroup(groupId).tools.delete(toolId)
+  }
+
+  hasTool(groupId: string, toolId: string): boolean {
+    return this.requireGroup(groupId).tools.has(toolId)
   }
 
   findDragTool(viewportId: string, event: ToolInputEvent): DragTool | null {
@@ -121,6 +162,22 @@ export class ToolGroupService {
     return null
   }
 
+  findPointTool(viewportId: string, event: ToolInputEvent): PointTool | null {
+    const group = this.groupForViewport(viewportId)
+    if (!group) {
+      return null
+    }
+    for (const state of group.tools.values()) {
+      if (state.mode !== 'active' || !isPointTool(state.tool)) {
+        continue
+      }
+      if (state.bindings.some(binding => binding.kind === 'point' && pointBindingMatches(binding, event))) {
+        return state.tool
+      }
+    }
+    return null
+  }
+
   findKeyTool(viewportId: string, event: ToolInputEvent): KeyTool | null {
     const group = this.groupForViewport(viewportId)
     if (!group) {
@@ -163,6 +220,10 @@ function dragBindingMatches(binding: Extract<ToolBinding, { kind: 'drag' }>, eve
   return (binding.button === undefined || binding.button === event.button) && modifiersMatch(binding.modifiers, event)
 }
 
+function pointBindingMatches(binding: Extract<ToolBinding, { kind: 'point' }>, event: ToolInputEvent): boolean {
+  return (binding.button === undefined || binding.button === event.button) && modifiersMatch(binding.modifiers, event)
+}
+
 function keyBindingMatches(binding: Extract<ToolBinding, { kind: 'key' }>, event: ToolInputEvent): boolean {
   const keyMatches = binding.key === undefined || binding.key.toLowerCase() === event.key?.toLowerCase()
   const codeMatches = binding.code === undefined || binding.code === event.code
@@ -191,6 +252,10 @@ function isWheelTool(tool: Tool): tool is WheelTool {
 
 function isHoverTool(tool: Tool): tool is HoverTool {
   return typeof (tool as HoverTool).onMove === 'function'
+}
+
+function isPointTool(tool: Tool): tool is PointTool {
+  return typeof (tool as PointTool).onPoint === 'function'
 }
 
 function isKeyTool(tool: Tool): tool is KeyTool {

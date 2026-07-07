@@ -1,1 +1,9 @@
 external/
+
+# nnInteractive proxy local runtime/build outputs
+nninteractive-proxy/.venv/
+nninteractive-proxy/build/
+nninteractive-proxy/dist/
+nninteractive-proxy/runtime/
+nninteractive-proxy/__pycache__/
+nninteractive-proxy/*.pyc

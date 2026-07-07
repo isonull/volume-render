@@ -11,7 +11,11 @@ import type { ScalarVolume } from '../volume'
 import type { Viewport } from '../viewport'
 import type { MprRenderState } from './mprState'
 
+export type RendererErrorHandler = (message: string) => void
+
 const UNIFORM_BYTES = 256
+const DEFAULT_MAX_BUFFER_SIZE = 256 * 1024 * 1024
+const PREFERRED_MAX_BUFFER_SIZE = 512 * 1024 * 1024
 const EMPTY_LABEL_COLORS = new Float32Array([0, 0, 0, 0])
 
 export class PreparedScene {
@@ -60,9 +64,10 @@ export class PreparedScalarVolume {
 export class PreparedLabelmapSegmentation {
   readonly texture: GPUTexture
   readonly textureView: GPUTextureView
-  readonly colorBuffer: GPUBuffer
+  colorBuffer: GPUBuffer
   readonly shape: Vec3n
   readonly indexToWorld: Mat4
+  private colorSignature: string
 
   constructor(device: GPUDevice, texture: GPUTexture, segmentation: LabelmapSegmentationData) {
     this.texture = texture
@@ -70,6 +75,18 @@ export class PreparedLabelmapSegmentation {
     this.colorBuffer = createLabelColorBuffer(device, segmentation)
     this.shape = segmentation.shape
     this.indexToWorld = segmentation.indexToWorld
+    this.colorSignature = labelColorSignature(segmentation)
+  }
+
+  syncLabelColors(device: GPUDevice, segmentation: LabelmapSegmentationData): void {
+    const nextSignature = labelColorSignature(segmentation)
+    if (nextSignature === this.colorSignature) {
+      return
+    }
+    const nextColorBuffer = createLabelColorBuffer(device, segmentation)
+    this.colorBuffer.destroy()
+    this.colorBuffer = nextColorBuffer
+    this.colorSignature = nextSignature
   }
 
   release(): void {
@@ -91,6 +108,7 @@ export class MprRenderer {
   private readonly emptyLabelmapTexture: GPUTexture
   private readonly emptyLabelmapTextureView: GPUTextureView
   private readonly emptyLabelColorBuffer: GPUBuffer
+  private errorHandler: RendererErrorHandler | null = null
 
   private constructor(device: GPUDevice, format: GPUTextureFormat, pipeline: GPURenderPipeline) {
     this.device = device
@@ -121,6 +139,9 @@ export class MprRenderer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     device.queue.writeBuffer(this.emptyLabelColorBuffer, 0, EMPTY_LABEL_COLORS)
+    this.device.addEventListener('uncapturederror', event => {
+      this.reportError(event.error.message)
+    })
   }
 
   static async create(): Promise<MprRenderer> {
@@ -131,7 +152,9 @@ export class MprRenderer {
     if (!adapter) {
       throw new Error('No WebGPU adapter was found.')
     }
-    const device = await adapter.requestDevice()
+    const device = await adapter.requestDevice({
+      requiredLimits: requiredDeviceLimits(adapter),
+    })
     const format = navigator.gpu.getPreferredCanvasFormat()
     const module = device.createShaderModule({ label: 'mpr.wgsl', code: mprShader })
     const pipeline = await device.createRenderPipelineAsync({
@@ -152,57 +175,71 @@ export class MprRenderer {
     return new MprRenderer(device, format, pipeline)
   }
 
+  onError(handler: RendererErrorHandler): void {
+    this.errorHandler = handler
+  }
+
   prepareScene(scene: Scene, previous?: PreparedScene): PreparedScene {
-    const prepared = previous && previous.sourceSceneId === scene.id
-      ? previous
-      : new PreparedScene(scene.id, scene.version)
+    this.device.pushErrorScope('validation')
+    try {
+      const prepared = previous && previous.sourceSceneId === scene.id
+        ? previous
+        : new PreparedScene(scene.id, scene.version)
 
-    if (previous && prepared !== previous) {
-      previous.release()
-    }
-
-    for (const [volumeId, volume] of scene.volumes) {
-      if (!prepared.preparedVolumes.has(volumeId)) {
-        prepared.preparedVolumes.set(volumeId, new PreparedScalarVolume(createGPUTexture(this.device, volume), volume))
+      if (previous && prepared !== previous) {
+        previous.release()
       }
-    }
 
-    for (const [segmentationId, segmentation] of scene.segmentations) {
-      if (!prepared.preparedSegmentations.has(segmentationId)) {
-        prepared.preparedSegmentations.set(
-          segmentationId,
-          new PreparedLabelmapSegmentation(this.device, createLabelmapGPUTexture(this.device, segmentation), segmentation),
-        )
-      }
-    }
-
-    for (const volumeId of [...prepared.preparedVolumes.keys()]) {
-      if (!scene.volumes.has(volumeId)) {
-        prepared.preparedVolumes.get(volumeId)?.release()
-        prepared.preparedVolumes.delete(volumeId)
-      }
-    }
-
-    for (const segmentationId of [...prepared.preparedSegmentations.keys()]) {
-      if (!scene.segmentations.has(segmentationId)) {
-        prepared.preparedSegmentations.get(segmentationId)?.release()
-        prepared.preparedSegmentations.delete(segmentationId)
-      }
-    }
-
-    for (const invalidation of prepared.pendingInvalidations) {
-      if (invalidation.type === 'segmentationTextureDirty') {
-        const segmentation = scene.segmentations.get(invalidation.segmentationId)
-        const preparedSegmentation = prepared.preparedSegmentations.get(invalidation.segmentationId)
-        if (segmentation && preparedSegmentation) {
-          writeLabelmapTexture(this.device, preparedSegmentation.texture, segmentation, invalidation.regions)
+      for (const [volumeId, volume] of scene.volumes) {
+        if (!prepared.preparedVolumes.has(volumeId)) {
+          prepared.preparedVolumes.set(volumeId, new PreparedScalarVolume(createGPUTexture(this.device, volume), volume))
         }
       }
-    }
 
-    prepared.sourceVersion = scene.version
-    prepared.pendingInvalidations.length = 0
-    return prepared
+      for (const [segmentationId, segmentation] of scene.segmentations) {
+        if (!prepared.preparedSegmentations.has(segmentationId)) {
+          prepared.preparedSegmentations.set(
+            segmentationId,
+            new PreparedLabelmapSegmentation(this.device, createLabelmapGPUTexture(this.device, segmentation), segmentation),
+          )
+        }
+      }
+
+      for (const volumeId of [...prepared.preparedVolumes.keys()]) {
+        if (!scene.volumes.has(volumeId)) {
+          prepared.preparedVolumes.get(volumeId)?.release()
+          prepared.preparedVolumes.delete(volumeId)
+        }
+      }
+
+      for (const segmentationId of [...prepared.preparedSegmentations.keys()]) {
+        if (!scene.segmentations.has(segmentationId)) {
+          prepared.preparedSegmentations.get(segmentationId)?.release()
+          prepared.preparedSegmentations.delete(segmentationId)
+        }
+      }
+
+      for (const invalidation of prepared.pendingInvalidations) {
+        if (invalidation.type === 'segmentationTextureDirty') {
+          const segmentation = scene.segmentations.get(invalidation.segmentationId)
+          const preparedSegmentation = prepared.preparedSegmentations.get(invalidation.segmentationId)
+          if (segmentation && preparedSegmentation) {
+            preparedSegmentation.syncLabelColors(this.device, segmentation)
+            writeLabelmapTexture(this.device, preparedSegmentation.texture, segmentation, invalidation.regions)
+          }
+        }
+      }
+
+      prepared.sourceVersion = scene.version
+      prepared.pendingInvalidations.length = 0
+      return prepared
+    } finally {
+      void this.device.popErrorScope().then(error => {
+        if (error) {
+          this.reportError(error.message)
+        }
+      })
+    }
   }
 
   render(preparedScene: PreparedScene, viewport: Viewport, state: MprRenderState): void {
@@ -216,33 +253,42 @@ export class MprRenderer {
 
     viewport.resizeFromClient()
     this.writeUniforms(volume, overlay, viewport, state)
-    const bindGroup = this.device.createBindGroup({
-      label: `MPR bind group ${viewport.id}`,
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: volume.textureView },
-        { binding: 2, resource: overlay?.textureView ?? this.emptyLabelmapTextureView },
-        { binding: 3, resource: { buffer: overlay?.colorBuffer ?? this.emptyLabelColorBuffer } },
-      ],
-    })
+    this.device.pushErrorScope('validation')
+    try {
+      const bindGroup = this.device.createBindGroup({
+        label: `MPR bind group ${viewport.id}`,
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniformBuffer } },
+          { binding: 1, resource: volume.textureView },
+          { binding: 2, resource: overlay?.textureView ?? this.emptyLabelmapTextureView },
+          { binding: 3, resource: { buffer: overlay?.colorBuffer ?? this.emptyLabelColorBuffer } },
+        ],
+      })
 
-    const encoder = this.device.createCommandEncoder({ label: `MPR render ${viewport.id}` })
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: viewport.getCurrentTextureView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    })
-    pass.setPipeline(this.pipeline)
-    pass.setBindGroup(0, bindGroup)
-    pass.draw(3)
-    pass.end()
-    this.device.queue.submit([encoder.finish()])
+      const encoder = this.device.createCommandEncoder({ label: `MPR render ${viewport.id}` })
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: viewport.getCurrentTextureView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      })
+      pass.setPipeline(this.pipeline)
+      pass.setBindGroup(0, bindGroup)
+      pass.draw(3)
+      pass.end()
+      this.device.queue.submit([encoder.finish()])
+    } finally {
+      void this.device.popErrorScope().then(error => {
+        if (error) {
+          this.reportError(error.message)
+        }
+      })
+    }
   }
 
   releasePreparedScene(preparedScene: PreparedScene): void {
@@ -287,14 +333,15 @@ export class MprRenderer {
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, data)
   }
+
+  private reportError(message: string): void {
+    this.errorHandler?.(message)
+  }
 }
 
 function createLabelColorBuffer(device: GPUDevice, segmentation: LabelmapSegmentationData): GPUBuffer {
   let maxLabel = 0
   for (const label of segmentation.segments.keys()) {
-    maxLabel = Math.max(maxLabel, label)
-  }
-  for (const label of segmentation.data) {
     maxLabel = Math.max(maxLabel, label)
   }
 
@@ -314,4 +361,25 @@ function createLabelColorBuffer(device: GPUDevice, segmentation: LabelmapSegment
   })
   device.queue.writeBuffer(buffer, 0, colors)
   return buffer
+}
+
+function labelColorSignature(segmentation: LabelmapSegmentationData): string {
+  return [...segmentation.segments.values()]
+    .sort((a, b) => a.label - b.label)
+    .map(segment => [
+      segment.label,
+      segment.color[0],
+      segment.color[1],
+      segment.color[2],
+      segment.opacity,
+      segment.visible ? 1 : 0,
+    ].join(','))
+    .join('|')
+}
+
+function requiredDeviceLimits(adapter: GPUAdapter): Record<string, number> {
+  const maxBufferSize = Math.min(adapter.limits.maxBufferSize, PREFERRED_MAX_BUFFER_SIZE)
+  return maxBufferSize > DEFAULT_MAX_BUFFER_SIZE
+    ? { maxBufferSize }
+    : {}
 }

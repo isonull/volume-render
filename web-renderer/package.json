@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "nninteractive:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\nninteractive-proxy\\scripts\\run.ps1",
+    "nninteractive:proxy:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\nninteractive-proxy\\scripts\\build-exe.ps1",
+    "nninteractive:proxy:smoke": "node ..\\nninteractive-proxy\\nninteractive_proxy_smoke.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {
